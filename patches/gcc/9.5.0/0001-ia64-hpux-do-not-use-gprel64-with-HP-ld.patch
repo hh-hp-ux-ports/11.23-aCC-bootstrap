@@ -1,0 +1,40 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 1/7] ia64-hpux: do not use @gprel64 for local symbols with HP ld
+
+HP ld B.12.34 mis-applies R_IA64_GPREL64I: it overwrites slot 0 of the MLX
+bundle as well as the L+X slots, destroying the "mov rNN = r1" GP save that
+lives there. Every function referencing a local symbol (any string literal)
+then dies with SIGILL at run time. The object file is correct -- GNU as emits
+the right code and relocation -- the corruption appears only after HP ld runs.
+Falling through to the @ltoff path restores what gcc 4.7.4 emits and which
+links and runs correctly. Cost: one extra load per local-symbol reference.
+
+This is blocker #1 of the gcc 9.5 ia64-hpux port.
+--- a/gcc/config/ia64/ia64.c
++++ b/gcc/config/ia64/ia64.c
+@@ -1137,13 +1137,23 @@
+     emit_insn (gen_load_fptr (dest, src));
+   else if (sdata_symbolic_operand (src, VOIDmode))
+     emit_insn (gen_load_gprel (dest, src));
+-  else if (local_symbolic_operand64 (src, VOIDmode))
++  else if (local_symbolic_operand64 (src, VOIDmode) && !TARGET_HPUX_LD)
+     {
+       /* We want to use @gprel rather than @ltoff relocations for local
+ 	 symbols:
+ 	  - @gprel does not require dynamic linker
+ 	  - and does not use .sdata section
+-	 https://gcc.gnu.org/bugzilla/60465 */
++	 https://gcc.gnu.org/bugzilla/60465
++
++	 PATCH 06 (ia64-hpux): ...but not with HP's linker.  ld B.12.34 mis-applies the resulting
++	 R_IA64_GPREL64I relocation: instead of patching only the L+X slots of the MLX bundle it
++	 overwrites slot 0 too, destroying whatever instruction sits there.  In practice that slot
++	 holds the "mov rNN = r1" GP save, so every function referencing a local symbol (i.e. any
++	 string literal) gets a corrupted bundle and dies with SIGILL at run time.  The object file
++	 itself is correct - GNU as emits the right code and relocation; the corruption appears only
++	 after HP ld runs.  Falling through to the @ltoff path below restores exactly what gcc 4.7.4
++	 emits here (it predates this optimisation) and which links and runs correctly on this
++	 target.  Cost: one extra load per local-symbol reference.  */
+       emit_insn (gen_load_gprel64 (dest, src));
+     }
+   else

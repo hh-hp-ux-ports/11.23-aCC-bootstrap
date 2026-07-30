@@ -1,0 +1,18 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 4/7] gcov-tool: nftw() is not available on HP-UX 11.23
+
+HP-UX 11.23 has ftw() but not nftw(). Only gcov-tool uses it.
+--- a/gcc/gcov-tool.c
++++ b/gcc/gcov-tool.c
+@@ -60,7 +60,11 @@
+ unlink_gcda_file (const char *name,
+                   const struct stat *status ATTRIBUTE_UNUSED,
+                   int type ATTRIBUTE_UNUSED,
++#ifdef __hpux
++                  struct FTW ftwbuf ATTRIBUTE_UNUSED)  /* HP-UX 11.23 nftw passes FTW by value */
++#else
+                   struct FTW *ftwbuf ATTRIBUTE_UNUSED)
++#endif
+ {
+   int ret = 0;
+   int len = strlen (name);

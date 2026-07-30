@@ -1,0 +1,24 @@
+#!/usr/bin/sh
+# swin <depot> [selection] — swinstall with LOCAL STAGING (NFS-source swinstall freezes on this
+# box): copies the depot (serial file or directory) to /depots/stage, installs, cleans up.
+# Kernel-relinking products (need autoreboot): stage stays after failure — rerun swinstall by hand.
+SRC=$1 ; SEL=$2
+[ -z "$SRC" ] && { echo "usage: swin <depot-file-or-dir> [selection (default all)]" ; exit 1 ; }
+[ -z "$SEL" ] && SEL='*'
+STAGE=/depots/stage
+rm -rf $STAGE ; mkdir -p $STAGE || exit 1
+case "$SRC" in
+  */) SRC=`echo "$SRC" | sed "s|/$||"` ;;
+esac
+if [ -f "$SRC" ] ; then
+  cp "$SRC" $STAGE/ || { echo "stage copy failed" ; exit 1 ; }
+  LOCAL=$STAGE/`basename "$SRC"`
+else
+  cp -r "$SRC" $STAGE/d || { echo "stage copy failed" ; exit 1 ; }
+  LOCAL=$STAGE/d
+fi
+echo "staged to $LOCAL — installing selection: $SEL"
+swinstall -x autoreboot=false -s "$LOCAL" "$SEL"
+rc=$?
+[ $rc -eq 0 ] && rm -rf $STAGE || echo "swinstall rc=$rc — stage kept at $LOCAL for retry/inspection"
+exit $rc

@@ -1,0 +1,13 @@
+# Build outputs are release artifacts, not source. Depots are 40 MB - 350 MB each
+# (1.9 GB total) and are attached to tagged GitHub Releases instead.
+*.depot
+*.depot.gz
+*.sd
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.bz2
+# extracted upstream trees: reproduce with the tarball + the patch series
+/src/
+*.DONE
+*.log

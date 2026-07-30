@@ -1,0 +1,32 @@
+From: HP-UX 11.23 port notes
+Subject: [PATCH 2/2] #undef REVISION, which HP-UX <langinfo.h> defines as an integer
+
+HP-UX 11.23 <langinfo.h> has "#define REVISION 64" (an obsolete nl_langinfo
+item code). nano uses "#ifdef REVISION" to mean "this is a git build and
+REVISION is the commit string", so the clash makes version() execute
+printf("%s", 64) and segfault on the very first --version. It compiles and
+links silently; only -Wformat hints at it.
+
+A release tarball defines no REVISION of its own, so dropping the system one
+restores the intended release branch.
+--- a/src/nano.c
++++ b/src/nano.c
+@@ -31,6 +31,18 @@
+ #endif
+ #ifdef ENABLE_UTF8
+ #include <langinfo.h>
++
++/* HP-UX 11.23's <langinfo.h> defines REVISION as an OBSOLETE nl_langinfo item code -- the
++ * integer 64.  nano uses "#ifdef REVISION" to mean "this is a git build and REVISION is the
++ * commit string", so the clash makes version() do printf("%s", 64) and segfault on the very
++ * first --version.  It compiles and links silently; only -Wformat hints at it.  A release
++ * tarball defines no REVISION of its own, so dropping the system one restores the intended
++ * release branch.  (Building from git on HP-UX would lose the commit string in --version --
++ * cosmetic, and preferable to a crash.)
++ */
++#if defined(__hpux) && defined(REVISION)
++#undef REVISION
++#endif
+ #endif
+ #include <locale.h>
+ #include <string.h>

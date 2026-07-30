@@ -1,0 +1,16 @@
+#!/usr/bin/sh
+# mountcd [u] — mount the DVD/CD drive at /mnt/cdrom (Rock Ridge); "mountcd u" unmounts.
+# Drive is /dev/dsk/c0t0d0 on this box.
+DEV=/dev/dsk/c0t0d0
+MNT=/mnt/cdrom
+if [ "$1" = "u" ] ; then
+  umount $MNT && echo "unmounted $MNT - safe to swap/remove disc"
+  exit $?
+fi
+mkdir -p $MNT
+if mount -F cdfs -o rr $DEV $MNT ; then
+  echo "mounted $DEV at $MNT:"
+  swlist -s $MNT 2>/dev/null | grep -v "^#" | head -5
+else
+  echo "mount failed - disc in drive?" ; exit 1
+fi

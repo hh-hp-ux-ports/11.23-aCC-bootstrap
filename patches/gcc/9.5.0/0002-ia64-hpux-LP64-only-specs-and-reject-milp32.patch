@@ -1,0 +1,80 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 2/7] ia64-hpux: hardcode LP64 startfiles, reject -milp32 with a real message
+
+ILP32 codegen ICEs on this target (simplify_subreg, simplify-rtx.c:6458) while
+building libgcc/libstdc++, so this build is LP64-only. The stock specs choose
+the startfile from the PRESENCE of -mlp64 rather than the actual ABI, so simply
+flipping the default would link 32-bit startfiles against 64-bit code. Hardcode
+the hpux64 paths and make -milp32 fail loudly at both compile and link instead
+of failing confusingly later.
+--- a/gcc/config/ia64/hpux.h
++++ b/gcc/config/ia64/hpux.h
+@@ -76,14 +76,27 @@
+ 
+ #undef ENDFILE_SPEC
+ 
++/* PATCH 05 (LP64-ONLY): ILP32 is unsupported on this build — its codegen ICEs
++   (simplify_subreg, simplify-rtx.c:6458) on libgcc/libstdc++ sources.  The specs used to pick the
++   startfile from the PRESENCE OF -mlp64 rather than the actual ABI, so simply flipping the default
++   would have linked 32-bit startfiles against 64-bit code.  Hardcode the 64-bit paths instead. */
+ #undef STARTFILE_SPEC
+ #define STARTFILE_SPEC "%{!shared:%{static:crt0%O%s} \
+-			  %{mlp64:/usr/lib/hpux64/unix98%O%s} \
+-			  %{!mlp64:/usr/lib/hpux32/unix98%O%s}}"
++			  /usr/lib/hpux64/unix98%O%s}"
++
++/* PATCH 05b: reject -milp32 explicitly, at compile AND link, with a real message — otherwise an
++   ILP32 attempt fails confusingly (64-bit startfiles vs 32-bit objects) because the specs above
++   now hardcode the hpux64 paths. */
++#undef CC1_SPEC
++#define CC1_SPEC "%{milp32:%eILP32 is not supported by this LP64-only build: ia64-hpux ILP32 codegen ICEs in simplify_subreg (gcc 9.5, simplify-rtx.c:6458). Build for LP64 (the default here), or use gcc 4.7.4 which supports both ABIs.}"
++
++#undef CC1PLUS_SPEC
++#define CC1PLUS_SPEC "%{milp32:%eILP32 is not supported by this LP64-only build: ia64-hpux ILP32 codegen ICEs in simplify_subreg (gcc 9.5, simplify-rtx.c:6458). Build for LP64 (the default here), or use gcc 4.7.4 which supports both ABIs.}"
+ 
+ #undef LINK_SPEC
+ #define LINK_SPEC \
+-  "-z +Accept TypeMismatch \
++  "%{milp32:%eILP32 is not supported by this LP64-only build: ia64-hpux ILP32 codegen ICEs in simplify_subreg (gcc 9.5, simplify-rtx.c:6458). Build for LP64 (the default here), or use gcc 4.7.4 which supports both ABIs.} \
++   -z +Accept TypeMismatch \
+    %{shared:-b} \
+    %{!shared: \
+      -u main \
+@@ -93,13 +106,20 @@
+ #define LIB_SPEC \
+   "%{!shared: \
+      %{mt|pthread:%{fopenacc|fopenmp|%:gt(%{ftree-parallelize-loops=*:%*} 1):-lrt} -lpthread} \
+-     %{p:%{!mlp64:-L/usr/lib/hpux32/libp} \
+-	 %{mlp64:-L/usr/lib/hpux64/libp} -lprof} \
+-     %{pg:%{!mlp64:-L/usr/lib/hpux32/libp} \
+-	  %{mlp64:-L/usr/lib/hpux64/libp} -lgprof} \
++     %{p:-L/usr/lib/hpux64/libp -lprof} \
++     %{pg:-L/usr/lib/hpux64/libp -lgprof} \
+      %{!symbolic:-lc}}"
+ 
+-#define MULTILIB_DEFAULTS { "milp32" }
++/* PATCH 05: LP64 is the default ABI now. */
++#define MULTILIB_DEFAULTS { "mlp64" }
++
++/* PATCH 05c: MULTILIB_DEFAULTS is not honoured under --disable-multilib, and TARGET_DEFAULT is a
++   legacy macro that gcc 9.5's option machinery never reads (verified: not referenced in opts.c,
++   common.opt or the opt generators).  DRIVER_SELF_SPECS is the mechanism that actually works: it
++   rewrites the command line before anything else, so -mlp64 is injected for compile AND link unless
++   the user explicitly asked for an ABI.  Without this the driver silently kept emitting ILP32. */
++#undef DRIVER_SELF_SPECS
++#define DRIVER_SELF_SPECS "%{!milp32:%{!mlp64:-mlp64}}"
+ 
+ /* A C expression whose value is zero if pointers that need to be extended
+    from being `POINTER_SIZE' bits wide to `Pmode' are sign-extended and
+@@ -110,9 +130,10 @@
+ 
+ #define JMP_BUF_SIZE  (8 * 76)
+ 
++/* PATCH 05: MASK_ILP32 removed -> LP64 is the default ABI. */
+ #undef TARGET_DEFAULT
+ #define TARGET_DEFAULT \
+-  (MASK_DWARF2_ASM | MASK_BIG_ENDIAN | MASK_ILP32)
++  (MASK_DWARF2_ASM | MASK_BIG_ENDIAN)
+ 
+ /* ASM_OUTPUT_EXTERNAL_LIBCALL defaults to just a globalize_label call,
+    but that doesn't put out the @function type information which causes

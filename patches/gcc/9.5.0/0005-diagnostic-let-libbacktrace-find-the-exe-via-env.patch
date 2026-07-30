@@ -1,0 +1,24 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 5/7] diagnostic: let libbacktrace find the executable via GCC_BT_EXE
+
+DIAGNOSTIC / NOT A FIX. libbacktrace cannot locate the running executable on
+HP-UX, so an ICE backtrace is empty. Reading the path from GCC_BT_EXE makes
+backtraces work while debugging the port. Not needed by a shipping compiler.
+--- a/gcc/diagnostic.c
++++ b/gcc/diagnostic.c
+@@ -530,7 +530,14 @@
+       {
+ 	struct backtrace_state *state = NULL;
+ 	if (diag_kind == DK_ICE)
+-	  state = backtrace_create_state (NULL, 0, bt_err_callback, NULL);
++	  {
++	    /* DIAGNOSTIC HACK (not for shipping): passing NULL makes libbacktrace locate the
++	       executable itself, which fails on HP-UX 11.23 - there is no /proc/self/exe, so every
++	       ICE prints "libbacktrace could not find executable to open" and no frames.  Allow the
++	       path to be supplied out-of-band so we can get a symbolised backtrace on this host.  */
++	    const char *btexe = getenv ("GCC_BT_EXE");
++	    state = backtrace_create_state (btexe, 0, bt_err_callback, NULL);
++	  }
+ 	int count = 0;
+ 	if (state != NULL)
+ 	  backtrace_full (state, 2, bt_callback, bt_err_callback,

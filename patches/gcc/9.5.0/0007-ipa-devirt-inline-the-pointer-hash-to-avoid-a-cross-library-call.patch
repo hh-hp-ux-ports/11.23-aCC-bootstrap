@@ -1,0 +1,46 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 7/7] ipa-devirt: inline the pointer hash to avoid a cross-library call
+
+CANDIDATE / INSUFFICIENT ON ITS OWN -- kept for the record. cc1plus text is
+37.6 MB, past the +/-16 MB reach of a direct br.call, and HP ld emits a direct
+branch instead of a long-branch stub for htab_hash_pointer. Inlining removes
+that one call site, but the linker emits 26 such out-of-range branches, so this
+fixes only one of them. The real fix was to link cc1/cc1plus/lto1 with our own
+linker.
+--- a/gcc/ipa-devirt.c
++++ b/gcc/ipa-devirt.c
+@@ -300,6 +300,20 @@
+   return (!in_lto_p || odr_type_p (t));
+ }
+ 
++/* PATCH 07 CANDIDATE (ia64-hpux workaround, DIAGNOSTIC): avoid calling libiberty's
++   htab_hash_pointer from here.  HP ld B.12.34 mis-links this particular call in cc1plus: the
++   caller and libiberty end up more than the 16 MB reach of a direct br.call apart (cc1plus text
++   is 37.6 MB), and instead of emitting a long-branch stub the linker emits a direct branch to an
++   address past the end of .text.  Executing it faults with SEGV_MAPERR where si_addr == ip.  It
++   only bites when the ODR type hash table rehashes, which is why it looks input-dependent.
++   htab_hash_pointer is two instructions, so computing it here removes the cross-library call
++   entirely.  Identical result by construction - libiberty's definition is exactly this.  */
++static inline hashval_t
++odr_hash_pointer_inline (const void *p)
++{
++  return (hashval_t) ((intptr_t) p >> 3);
++}
++
+ /* Hash type by its ODR name.  */
+ 
+ static hashval_t
+@@ -310,11 +324,11 @@
+   /* If not in LTO, all main variants are unique, so we can do
+      pointer hash.  */
+   if (!in_lto_p)
+-    return htab_hash_pointer (t);
++    return odr_hash_pointer_inline (t);
+ 
+   /* Anonymous types are unique.  */
+   if (type_with_linkage_p (t) && type_in_anonymous_namespace_p (t))
+-    return htab_hash_pointer (t);
++    return odr_hash_pointer_inline (t);
+ 
+   gcc_checking_assert (TYPE_NAME (t)
+ 		       && DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t)));

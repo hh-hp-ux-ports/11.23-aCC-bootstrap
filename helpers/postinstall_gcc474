@@ -1,0 +1,21 @@
+#!/usr/bin/sh
+# GNUgcc474 (aCC-rooted) postinstall — register /opt/gnu/gcc474/bin in /etc/PATH.
+# This update supersedes the PROCURA-rooted 4.7.4 that lived at /opt/gcc474, so /etc/PATH would
+# otherwise be left pointing at a directory SD just removed, and the new prefix would not be on PATH
+# at all — i.e. no gcc in a login shell. Swap the old entry for the new one, or prepend if absent.
+# Idempotent: re-running changes nothing once correct.
+OLD=/opt/gcc474/bin
+NEW=/opt/gnu/gcc474/bin
+P=/etc/PATH
+[ -f "$P" ] || exit 0
+cp -p "$P" "$P.before-GNUgcc474" 2>/dev/null
+if grep "$NEW" "$P" > /dev/null 2>&1 ; then
+  :                                                   # already registered
+elif grep "$OLD" "$P" > /dev/null 2>&1 ; then
+  sed "s|$OLD|$NEW|g" "$P" > "$P.tmp" && mv "$P.tmp" "$P"
+  echo "GNUgcc474: /etc/PATH $OLD -> $NEW"
+else
+  echo "$NEW:`cat $P`" > "$P.tmp" && mv "$P.tmp" "$P"
+  echo "GNUgcc474: prepended $NEW to /etc/PATH"
+fi
+exit 0

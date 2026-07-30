@@ -1,0 +1,19 @@
+#!/usr/bin/sh
+# GNUbinutils (aCC-rooted) postinstall — register /opt/gnu/binutils2461/bin in /etc/PATH.
+# Same reasoning as the gcc one: this supersedes the PROCURA build at /opt/binutils, which SD
+# removes, so without this the assembler/ar/nm/objdump drop off PATH entirely.
+OLD=/opt/binutils/bin
+NEW=/opt/gnu/binutils2461/bin
+P=/etc/PATH
+[ -f "$P" ] || exit 0
+cp -p "$P" "$P.before-GNUbinutils" 2>/dev/null
+if grep "$NEW" "$P" > /dev/null 2>&1 ; then
+  :
+elif grep "$OLD" "$P" > /dev/null 2>&1 ; then
+  sed "s|$OLD|$NEW|g" "$P" > "$P.tmp" && mv "$P.tmp" "$P"
+  echo "GNUbinutils: /etc/PATH $OLD -> $NEW"
+else
+  echo "$NEW:`cat $P`" > "$P.tmp" && mv "$P.tmp" "$P"
+  echo "GNUbinutils: prepended $NEW to /etc/PATH"
+fi
+exit 0

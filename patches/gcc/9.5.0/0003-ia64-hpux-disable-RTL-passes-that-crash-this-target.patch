@@ -1,0 +1,34 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 3/7] ia64-hpux: default off two RTL passes that crash on this target
+
+cc1 segfaults in the RTL PRE pass (gcse.c, ILP32 -O2) and the RTL
+loop-invariant-motion pass (loop-invariant.c, LP64 -O1+) on pointer-heavy and
+template-heavy input. ia64-linux of the same vintage does not: target-specific
+RTL feeding shared passes. Default both off so the shipped compiler cannot hit
+them; tree-level LIM still runs, so the optimisation cost is modest.
+-fgcse / -fmove-loop-invariants re-enable them explicitly.
+--- a/gcc/config/ia64/ia64.c
++++ b/gcc/config/ia64/ia64.c
+@@ -6093,6 +6103,22 @@
+   if (TARGET_AUTO_PIC)
+     target_flags |= MASK_CONST_GP;
+ 
++  /* HP-UX-local workaround (2026-07-23): on ia64-hpux this compiler segfaults in
++     the RTL PRE pass (gcse.c, ILP32 at -O2) and the RTL loop-invariant-motion pass
++     (loop-invariant.c, LP64 at -O1+) on template-heavy/pointer-heavy code; the
++     ia64-linux configurations of the same era do not exhibit this (target-specific
++     RTL feeding shared passes).  Default both passes OFF so the shipped compiler
++     cannot hit the crashes; tree-level LIM still runs, so the optimization cost is
++     modest.  Users may re-enable explicitly (-fgcse / -fmove-loop-invariants) at
++     their own risk.  See toolchain notes; candidate for a real fix later.  */
++  if (TARGET_HPUX)
++    {
++      if (!global_options_set.x_flag_gcse)
++	flag_gcse = 0;
++      if (!global_options_set.x_flag_move_loop_invariants)
++	flag_move_loop_invariants = 0;
++    }
++
+   /* Numerous experiment shows that IRA based loop pressure
+      calculation works better for RTL loop invariant motion on targets
+      with enough (>= 32) registers.  It is an expensive optimization.

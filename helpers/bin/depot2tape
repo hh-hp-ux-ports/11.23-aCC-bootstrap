@@ -1,0 +1,97 @@
+#!/usr/bin/sh
+# depot2tape <depot> [tape-device] — write ONE SD depot to tape as a serial depot, then verify it.
+#
+#   depot2tape /depots/VendorAll
+#   depot2tape /depots/VendorAll /dev/rmt/0m
+#
+# Default device is /dev/rmt/1m (rewind-on-close). Use the REWIND device, not the "n" no-rewind
+# variants: this writes a single depot per tape on purpose (see ONE DEPOT PER TAPE below).
+#
+# WHY THIS IS SEPARATE FROM swmerge: merging depots and writing tape are different tools with
+# different rules. swcopy CANNOT write to a tape device at all (it ignores the device and lands in
+# /var/spool/sw); only swpackage writes tape. Keeping them apart means neither script pretends to do
+# something the underlying command cannot.
+#
+# NON-ROOT IS FINE HERE. Unlike swcopy (which needs root for any @ target), swpackage writes a
+# serial depot to tape as an ordinary user — the tools are not symmetric.
+#
+# ⚠️ ONE DEPOT PER TAPE. You can append a second tape file with `mt eod` + another swpackage, but
+# reading back anything except the FIRST tape file has been observed unreliable and sometimes
+# destructive on this drive. So this script always rewinds first and writes exactly one depot. If
+# you need more than one, use another cartridge — they are cheap, a corrupted archive is not.
+#
+# NO COMPRESSION: measured on this box, HP's own depot content is already compressed (their large
+# files gzip to ~96%; ours to ~32%), and the LTO drive compresses in hardware. Adding
+# -x compress_files=true would only cost install-time CPU later.
+
+# ⚠️ media_capacity IS THE WHOLE BALLGAME. swpackage's default is media_capacity=1330 — the size of
+# a DDS-1 cartridge from 1989, in MILLION-BYTE units (not MiB). Leave it alone and swpackage happily
+# partitions the depot into 1.33 GB volumes and prompts for the next cartridge: a 22.5 GB depot
+# becomes a SEVENTEEN TAPE set on a drive that holds it 17 times over. Measured 2026-07-28 — tape #1
+# closed at exactly 1,337,190,400 bytes, which is the default plus catalog overhead, and the prompt
+# ("To continue with the next tape...") reads like the drive is full when nothing is.
+# Pass the real capacity of YOUR media, in million-byte units:
+#     LTO-1  ~95000      LTO-3  ~380000      DDS-4  ~19000
+DEPOT=$1
+TAPE=${2:-/dev/rmt/1m}
+CAP=${3:-380000}
+
+usage() {
+  echo "usage: depot2tape <depot> [tape-device] [media-capacity]"
+  echo "       defaults: device /dev/rmt/1m, capacity 380000 (LTO-3, in MILLION-byte units)"
+  echo "example: depot2tape /depots/merging"
+  echo "         depot2tape /depots/merging /dev/rmt/0m 95000     # LTO-1"
+  echo ""
+  echo "  The capacity matters: swpackage defaults to 1330 (a DDS-1 tape) and will silently"
+  echo "  split a large depot across many cartridges rather than filling the one you loaded."
+  exit 1
+}
+
+[ -z "$DEPOT" ] && usage
+[ -d "$DEPOT" ] || [ -f "$DEPOT" ] || { echo "no such depot: $DEPOT"; exit 1; }
+[ -c "$TAPE" ] || { echo "not a tape device: $TAPE"; echo "available:"; ls /dev/rmt/ 2>/dev/null | sed 's/^/  /'; exit 1; }
+
+# swpackage -s needs a REGISTERED depot; a hand-made directory of depot-shaped files fails with
+# "Cannot open source depot ... because it is not registered". swlist is the cheap check.
+NPROD=`swlist -s "$DEPOT" -l product 2>/dev/null | grep -v '^#' | grep -v '^$' | wc -l`
+if [ "$NPROD" -eq 0 ] ; then
+  echo "ERROR: '$DEPOT' does not list as an SD depot (swlist found no products)."
+  echo "       swpackage needs a registered depot, not just a directory of depot-shaped files."
+  exit 1
+fi
+echo "source depot : $DEPOT  ($NPROD product line(s))"
+echo "tape device  : $TAPE"
+echo "media capacity: $CAP million-byte units (swpackage default is 1330 = a DDS-1 tape)"
+
+if ! mt -t "$TAPE" status > /dev/null 2>&1 ; then
+  echo "ERROR: no tape loaded in $TAPE (or drive not ready). Insert a cartridge and rerun."
+  exit 1
+fi
+
+echo ""
+echo "=== rewinding ==="
+mt -t "$TAPE" rew || { echo "cannot rewind $TAPE"; exit 1; }
+
+echo "=== writing (this overwrites the tape from the beginning) ==="
+swpackage -s "$DEPOT" -x target_type=tape -x media_capacity=$CAP -d "$TAPE" '*'
+rc=$?
+# SD reports rc=1 for warnings alone, so the read-back below is the real verdict, not this code.
+[ $rc -ne 0 ] && echo "  swpackage rc=$rc (SD warns with rc=1; the verify below decides)"
+
+echo ""
+echo "=== verifying: reading the catalog back off the tape ==="
+mt -t "$TAPE" rew || { echo "cannot rewind for verify"; exit 1; }
+VER=`swlist -s "$TAPE" -l product 2>/dev/null | grep -v '^#' | grep -v '^$' | wc -l`
+echo "  tape reports : $VER product line(s)"
+echo "  disk depot   : $NPROD product line(s)"
+
+if [ "$VER" -ne "$NPROD" ] ; then
+  echo ""
+  echo "MISMATCH — tape NOT verified. Leaving the tape loaded (that is the failure signal)."
+  exit 2
+fi
+
+echo ""
+echo "VERIFIED. Ejecting (ejection = success, same convention as backup2tape)."
+mt -t "$TAPE" offl && echo "tape ejected."
+exit 0

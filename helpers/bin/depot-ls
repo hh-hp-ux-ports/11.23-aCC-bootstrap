@@ -1,0 +1,10 @@
+#!/usr/bin/sh
+# depot-ls [depot-or-mount] — list BUNDLES and PRODUCTS with revisions (plain swlist shows only
+# bundles; products like OnlineJFS01 hide below that level).
+D=$1
+[ -z "$D" ] && D=/mnt/cdrom
+echo "== bundles on $D =="
+swlist -s "$D" 2>/dev/null | grep -v "^#"
+echo ""
+echo "== products on $D =="
+swlist -l product -s "$D" 2>/dev/null | grep -v "^#"

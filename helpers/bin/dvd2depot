@@ -1,0 +1,14 @@
+#!/usr/bin/sh
+# dvd2depot <name> — mount the DVD and swcopy ALL its products into /depots/<name> (accumulates
+# across discs: run again with the next disc and the same <name>), then umount for the swap.
+# rc!=0 with a healthy listing usually = codeword-protected items skipped (normal).
+NAME=$1
+[ -z "$NAME" ] && { echo "usage: dvd2depot <depot-name>" ; exit 1 ; }
+mount -F cdfs -o rr /dev/dsk/c0t0d0 /mnt/cdrom 2>/dev/null
+swlist -s /mnt/cdrom > /dev/null 2>&1 || { echo "no depot on /mnt/cdrom - disc mounted?" ; exit 1 ; }
+swcopy -x enforce_dependencies=false -s /mnt/cdrom \* @ /depots/$NAME
+rc=$?
+N=`swlist -s /depots/$NAME 2>/dev/null | grep -v "^#" | grep -c .`
+echo "== /depots/$NAME now holds $N product line(s) (swcopy rc=$rc)"
+umount /mnt/cdrom && echo "unmounted - safe to swap/remove disc"
+exit 0
