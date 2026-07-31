@@ -1,4 +1,4 @@
-# A modern GNU toolchain for HP-UX 11.23 on Itanium, bootstrapped from HP's own compiler
+# gcc for HP-UX 11.23 on Itanium, bootstrapped from HP's own aC++
 
 This is the source side of an effort to build a current GNU toolchain and userland on a
 2004-vintage **HP Integrity rx2620** (HP-UX B.11.23, ia64) using **nothing but the compiler HP
@@ -31,20 +31,22 @@ long-branch stubs. See `patches/gcc/9.5.0/` and `docs/gotchas.md`.
 
 | path | what |
 |---|---|
-| `docs/gotchas.md` | **Read this first.** Every HP-UX 11.23 build failure hit here, with its cause and fix. |
+| `docs/gotchas.md` | **Read this first.** Every HP-UX 11.23 build failure hit here, with its cause and fix. Canonical copy — the userland repo links to it rather than duplicating it. |
 | `docs/policy.md` | ABI (LP64 default), optimisation limits, acceptance rules. |
 | `docs/packaging.md` | The `swpackage` PSF recipe and the SD-UX traps. |
-| `patches/<tool>/<version>/` | Numbered patch series, one concern per patch, `patch -p1` from the source root. |
-| `build/` | Per-tool build recipes: detached, sentinel-gated, with version ladders. |
-| `packaging/` | Scripts that turn a staged tree into a depot. |
-| `helpers/bin/` | Admin helpers shipped as the `HelperScripts` SD product. |
+| `patches/gcc/<version>/` | Numbered patch series, one concern per patch, `patch -p1` from the source root. |
+| `build/` | The compiler build recipes: detached, sentinel-gated. |
+
+The GNU **userland** for this platform — nano, grep, the SD packaging and the admin helpers — lives
+in [11.23-ports](https://github.com/hh-hp-ux-ports/11.23-ports). This repository is the compiler
+chain only.
 
 ## Applying a patch series
 
 ```sh
-tar xf nano-9.1.tar.gz
-cd nano-9.1
-for p in ../patches/nano/9.1/*.patch ; do patch -p1 -i "$p" || break ; done
+tar xf gcc-9.5.0.tar.xz
+cd gcc-9.5.0
+for p in ../patches/gcc/9.5.0/*.patch ; do patch -p1 -i "$p" || break ; done
 ```
 
 Every patch in this repository has been verified to apply cleanly to the pristine upstream tarball.
@@ -53,9 +55,8 @@ Every patch in this repository has been verified to apply cleanly to the pristin
 
 They fall into three kinds, and the distinction matters:
 
-- **Portability fixes** that are correct everywhere and are upstreamable as-is — e.g.
-  `nano/9.1/0001`, which routes timestamp access through gnulib's `stat-time` module rather than
-  raw `st_mtim`, because HP-UX 11.23 has no nanosecond stat timestamps at all.
+- **Portability fixes** that are correct everywhere — e.g. `gcc/9.5.0/0004`, `nftw()` simply does
+  not exist on 11.23.
 - **Platform workarounds** that are right for this target and wrong elsewhere — e.g.
   `gcc/9.5.0/0001`, which stops using `@gprel64` for local symbols because HP `ld` mis-applies the
   relocation and corrupts the instruction bundle.
@@ -67,12 +68,14 @@ Each patch says which it is in its header.
 
 ## Related
 
-`libgnushim` — the 17-function HP-UX 11.23 compat shim (gnulib-derived, pinned 2020) — is its own
-repository. It is a real library with an API contract consumed by many of these builds, so it is
-versioned independently rather than vendored here.
+- [11.23-ports](https://github.com/hh-hp-ux-ports/11.23-ports) — the GNU userland built with this
+  compiler, plus the SD packaging and admin helpers.
+- [11.23-libgnushim](https://github.com/hh-hp-ux-ports/11.23-libgnushim) — the 17-function HP-UX
+  11.23 compat shim. A real library with an API contract, so versioned independently.
+- [11.23-hld](https://github.com/hh-hp-ux-ports/11.23-hld) — a linker for this target. HP's `ld`
+  mis-links binaries past PCREL21B's ±16 MB reach, which is what stalled gcc 9.5 here.
 
 ## Licence
 
-The patches are derivative works of their upstream projects and carry those projects' licences
-(GPL for gcc and nano). The build scripts, packaging recipes, helpers and documentation in this
-repository are original work — see `LICENSE`.
+The patches are derivative works of GCC and carry its licence (GPL). The build recipes and
+documentation in this repository are original work.
