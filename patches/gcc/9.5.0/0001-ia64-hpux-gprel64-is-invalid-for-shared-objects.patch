@@ -1,0 +1,71 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 1/7] ia64-hpux: do not use @gprel64 for local symbols
+
+TWO independent reasons, and the second is the important one because it applies
+to EVERY linker, not just HP's. Both measured on rx2620.
+
+1. HP ld B.12.34 mis-applies R_IA64_GPREL64I: it overwrites slot 0 of the MLX
+   bundle as well as the L+X slots, destroying the "mov rNN = r1" GP save that
+   lives there. Every function referencing a local symbol (any string literal)
+   then dies with SIGILL. The object file is correct -- GNU as emits the right
+   code and relocation -- the corruption appears only after HP ld runs.
+
+2. ★ @gprel64 to anything OUTSIDE THE DATA SEGMENT IS INVALID IN A SHARED
+   OBJECT ON THIS PLATFORM, for any linker. A gp-relative constant encodes the
+   link-time distance S - GP, which survives loading only if the target and gp
+   move together. On ia64-hpux they do not -- the text and data segments are
+   mapped independently:
+
+       .rodata   link 4000000000000250   run c000000005054250
+       .data     link 6000000000000000   run 9fffffffef7f2008
+
+   The distance is not preserved, so the immediate is wrong the moment the
+   library loads, whatever value a linker wrote. No dynamic relocation can
+   rescue it either: the loader relocates data words, not the 64-bit immediate
+   inside an MLX bundle. Measured symptom: a function returning a pointer to
+   its own string constant returns the LINK-TIME address and the caller
+   SIGSEGVs. This is why `.sdata` access through gp works while `.rodata`
+   access fails -- .sdata shares the segment with gp and .rodata does not.
+
+gcc 4.7.4 emits @ltoff (LTOFF22X/LDXMOV) here and is correct on both counts;
+gcc 9.5's @gprel64 choice is what makes its shared-library output unusable on
+ia64-hpux. Falling through to the @ltoff path restores the working behaviour.
+Cost: one extra load per local-symbol reference.
+
+⇒ KEEP THIS PATCH PERMANENTLY FOR --enable-shared. It was retired 2026-07-31
+on the evidence that the EXECUTABLE build completes without it, which remains
+true -- executables load at fixed addresses so the distance is constant, and
+cc1plus is the proof. Shared libraries are the case that needs it, and reason 2
+means no future linker release will remove that need.
+
+Scale of the problem without it: our gcc 9.5 libstdc++.a carries 1,857
+GPREL64I relocations across 72 of its 183 objects.
+--- a/gcc/config/ia64/ia64.c
++++ b/gcc/config/ia64/ia64.c
+@@ -1137,13 +1137,23 @@
+     emit_insn (gen_load_fptr (dest, src));
+   else if (sdata_symbolic_operand (src, VOIDmode))
+     emit_insn (gen_load_gprel (dest, src));
+-  else if (local_symbolic_operand64 (src, VOIDmode))
++  else if (local_symbolic_operand64 (src, VOIDmode) && !TARGET_HPUX_LD)
+     {
+       /* We want to use @gprel rather than @ltoff relocations for local
+ 	 symbols:
+ 	  - @gprel does not require dynamic linker
+ 	  - and does not use .sdata section
+-	 https://gcc.gnu.org/bugzilla/60465 */
++	 https://gcc.gnu.org/bugzilla/60465
++
++	 ia64-hpux: NOT on this target.  Two reasons, either sufficient.  (a) HP ld B.12.34
++	 mis-applies R_IA64_GPREL64I, overwriting slot 0 of the MLX bundle - which holds the
++	 "mov rNN = r1" GP save - so any local-symbol reference dies with SIGILL.  (b) More
++	 fundamentally, a gp-relative constant encodes the LINK-TIME distance S - GP, and on
++	 ia64-hpux the text and data segments are mapped INDEPENDENTLY at load time, so that
++	 distance is not preserved in a shared object.  No linker can write a correct value and
++	 no dynamic relocation can fix it, because the loader relocates data words rather than
++	 the 64-bit immediate inside an MLX bundle.  @ltoff (what gcc 4.7.4 emits) goes through
++	 the linkage table, which IS relocated, and is correct in both cases.
++	 Cost: one extra load per local-symbol reference.  */
+       emit_insn (gen_load_gprel64 (dest, src));
+     }
+   else

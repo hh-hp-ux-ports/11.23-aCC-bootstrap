@@ -1,0 +1,36 @@
+From: HP-UX 11.23 ia64 port notes
+Subject: [PATCH 4/7] gcov-tool: HP-UX passes struct FTW to the nftw callback BY VALUE
+
+HP-UX 11.23 DOES have nftw() — it is declared in <ftw.h> and present in libc
+as a weak symbol. What differs is the callback's fourth parameter: HP declares
+
+    int nftw(const char *, int (*)(const char *, const struct stat *,
+                                   int, struct FTW), int, int);
+
+i.e. `struct FTW` BY VALUE (see /usr/include/ftw.h), where POSIX and glibc pass
+`struct FTW *`. gcov-tool's unlink_gcda_file therefore has the wrong prototype
+and the build fails on the incompatible function-pointer argument.
+
+Only gcov-tool uses nftw in gcc, and it ignores the parameter entirely, so
+matching HP's declaration under __hpux is sufficient and changes no behaviour.
+
+NOTE: this is deliberately NOT routed through libgnushim. gcc sits at the root
+of the toolchain — libgnushim is built BY gcc — so a link-time dependency from
+gcc onto the shim would invert the stack and tie the gcc depot to the shim
+depot. A six-line __hpux prototype guard is also plausibly upstreamable; a
+private compat library is not. Userland ports that hit the same divergence
+should use libgnushim's rpl_nftw instead.
+--- a/gcc/gcov-tool.c
++++ b/gcc/gcov-tool.c
+@@ -60,7 +60,11 @@
+ unlink_gcda_file (const char *name,
+                   const struct stat *status ATTRIBUTE_UNUSED,
+                   int type ATTRIBUTE_UNUSED,
++#ifdef __hpux
++                  struct FTW ftwbuf ATTRIBUTE_UNUSED)  /* HP-UX 11.23 nftw passes FTW by value */
++#else
+                   struct FTW *ftwbuf ATTRIBUTE_UNUSED)
++#endif
+ {
+   int ret = 0;
+   int len = strlen (name);

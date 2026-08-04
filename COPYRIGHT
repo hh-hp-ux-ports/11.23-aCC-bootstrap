@@ -1,0 +1,21 @@
+Scope of licensing in this repository
+=====================================
+
+PATCHES  (patches/<package>/<version>/*.patch)
+    Each patch is a modification of the package named in its path and is a derivative work of it,
+    so each carries THAT package's licence rather than one chosen here.  This is what allows a
+    patch to be offered upstream unchanged.  Everything currently present patches GCC or binutils,
+    both GPL-3.0-or-later, so LICENSE governs all of them today — but read a patch's own header
+    rather than assuming that stays true.
+
+DOCUMENTATION AND BUILD RECIPES  (README.md, docs/, build/, this file)
+    Original work, offered under GPL-3.0-or-later.  docs/gotchas.md is the canonical record of what
+    breaks on HP-UX 11.23 and why; it is deliberately not duplicated into the sibling repositories,
+    which link to it instead.
+
+LICENSE
+    Verbatim GNU General Public License version 3.
+
+BINARIES
+    The depots built from these recipes are not in git — they are attached to tagged releases.
+    Each one ships the corresponding source alongside the binaries, as the GPL requires.

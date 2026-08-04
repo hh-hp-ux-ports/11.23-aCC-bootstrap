@@ -241,3 +241,446 @@ a stray process on a pty). There is no `expect` on the box. So: verify what can 
 (ELF-64, `--version`, `--help`, `chatr` linkage, terminfo DB present) and hand the interactive smoke
 test to Hugo rather than burning time on blind keystroke injection. Kill strays afterwards —
 `pkill -f <path>` — or they sit on a pty forever.
+
+## `--with-ld=X` does NOT make gcc link its OWN binaries with X (2026-07-31, cost a whole investigation)
+`--with-ld=/opt/hld/bin/hld` sets `DEFAULT_LINKER` — the linker the **compiler you are building**
+invokes when it links **target** programs. `cc1`, `cc1plus`, `lto1` and `xgcc` are **host** programs:
+they are linked by the host `g++`, which uses ITS OWN compiled-in linker. Check it with
+`g++ -print-prog-name=ld`, not with the configure log.
+
+This cost days on the gcc 9.5 port: every cc1plus we dissected was HP `ld` output while we believed
+it was our own linker's, so a bogus `br.call` past `_etext` and an `LTOFF22X`/`LDXMOV` theory were
+both filed as linker defects against the wrong linker, plus four negative isolation tests chasing a
+bug that was not there.
+
+**To link the host binaries with a different linker, no makefile edits needed:**
+```sh
+mkdir -p /var/tmp/hldbin && ln -sf /opt/hld/bin/hld /var/tmp/hldbin/ld
+export COMPILER_PATH=/var/tmp/hldbin      # gcc searches this for `ld` before its built-in path
+g++ -print-prog-name=ld                   # MUST now report /var/tmp/hldbin/ld
+```
+`-B/var/tmp/hldbin/` works identically if you can reach the compiler's command line.
+
+**Generalise — never diagnose a binary whose provenance you have not verified.** Get the producing
+tool to stamp its output (hld ≥0.9.3 writes a `what` string) and check it FIRST. And beware
+grep decoys when confirming which tool ran: our build log matched "hld" 2187 times but the actual
+binary path `/opt/hld/bin/hld` only twice — 2058 matches were the SOURCE DIRECTORY, named
+`gcc-9.5.0-hld`. Count the specific path, not the substring.
+
+## `-lfoo` prefers the shared library — force static for gmp/mpfr/mpc (2026-07-31)
+`/usr/local/ia64/lib/hpux64` holds both `libmpfr.a` and `libmpfr.so.4.1`, and `-lmpfr` takes the
+`.so`. The resulting cc1plus then needs `SHLIB_PATH` set by the END USER to start, because
+`libmpc.so.2`'s own RUNPATH points at `/usr/local/ia64/lib` — the **ILP32** dir — and `DT_RUNPATH`
+is deliberately NOT inherited by dependencies, so the executable's correct RUNPATH does not rescue
+its dependency's dependency. Symptom: `dld.so: Unable to find library 'libmpfr.so.4'`.
+
+Fix, and what gcc upstream recommends anyway — a `-L` directory holding ONLY the archives, placed
+before the real one:
+```sh
+M=/var/tmp/staticmath; mkdir -p $M
+for l in mpc mpfr gmp; do ln -sf /usr/local/ia64/lib/hpux64/lib$l.a $M/lib$l.a; done
+# then: -L$M -L/usr/local/ia64/lib/hpux64 -lmpc -lmpfr -lgmp
+```
+`DT_NEEDED` drops to `libc.so.1` alone and the binary runs with no `SHLIB_PATH`. Verify with
+`readelf -d <binary> | grep -E 'NEEDED|RUNPATH'` — and prefer this over exporting `SHLIB_PATH`,
+which merely hides the problem until someone else runs the compiler.
+
+## `gcc` and `g++` are SEPARATE binaries with SEPARATE compiled-in specs (2026-07-31)
+Changing a spec macro in `gcc/config/<cpu>/<os>.h` (LIB_SPEC, LINK_SPEC…) and relinking only `xgcc`
+leaves the C++ driver carrying the OLD spec. The symptom is maddening: `gcc -dumpspecs` shows the
+fix, `g++ -dumpspecs` does not, and every C++ link keeps failing exactly as before — so it looks
+like the edit never took effect at all.
+
+**Relink `xgcc xg++ cpp` together**, and verify with `-dumpspecs` on EACH driver, not just one.
+
+Two more traps in the same area:
+- **An objdir `gcc/specs` FILE overrides the built-in specs.** After editing a spec macro the driver
+  can still emit the old link line because it is reading that file. Move it aside to test. The
+  INSTALLED compiler has no specs file, which is why only a staged/installed test is trustworthy.
+- **Editing any target header invalidates `tm.h`,** which most of the compiler includes — expect a
+  ~450-object rebuild, not a relink. On a 1-CPU box that is ~40 minutes, so batch spec changes.
+
+## Never acceptance-test an UNINSTALLED gcc from its objdir (2026-07-31)
+`./gcc/xgcc -B./gcc/ -x c++ test.cc` fails with `fatal error: string: No such file or directory` —
+an uninstalled driver has no libstdc++ header path. That is a HARNESS bug, not a compiler fault, and
+it wasted a full build cycle. Install to a DESTDIR staging tree and test the staged compiler: gcc's
+driver computes its paths relative to its own binary, so a staged tree runs in place. It also tests
+what you would actually ship.
+
+## HP-UX errno numbering diverges from Linux — `ENOSYS` is **251**, not 38 (2026-07-31)
+Reported by the ia64-emulator session, measured against rx2620. The low values agree; the numbering
+diverges above them. Anything that hard-codes an errno integer, or compares errno constants across
+the two systems, is a trap — including compat shims that define a fallback when a symbol is missing.
+Always use the `<errno.h>` constant, never the literal, and never copy an errno table from a Linux
+man page into HP-UX code.
+
+Related, from the same source and worth knowing when writing raw syscall probes on this box:
+- **A symbol in a library does not mean the syscall exists.** `uld.so` ships a `_lwp_getprivate`
+  stub, but syscall 67 is not in this kernel's table and the raw call takes SIGSYS.
+- **Let a probe fault to discover arity.** `lwp_getscheduler` probed with 3 args writes the policy
+  into arg 3 and *then* returns EFAULT for the missing 4th — the partial write reveals both the
+  count and the order.
+- **The assembler is a free oracle.** Deliberately assembling an illegal spelling makes `as` state
+  the rule: `Operand 3 of 'fetchadd4.acq' should be an increment (+/- 1, 4, 8, or 16)`. Cheaper than
+  reasoning about field widths.
+
+## ⚠️ gas SILENTLY DISCARDS every `;;` unless the file says `.explicit` (2026-07-31)
+Assembling any `.s` for ia64 without `.explicit` puts gas in auto-bundling mode, where it emits:
+
+    Warning: Explicit stops are ignored in auto mode
+
+and drops every stop bit you wrote. It is a WARNING, not an error — the object assembles,
+disassembles, and looks right. For anything where a stop is semantically load-bearing (RSE work:
+`mov ar.bspstore` then reading stacked registers; any `mov` to an application register followed by
+a dependent read) the result is a program that measures or does the wrong thing with no diagnostic.
+
+**Put `.explicit` as the first directive in every hand-written `.s`, and CONFIRM the stops survived
+by disassembling the object** — `objdump -d x.o` should show `;;` where you wrote them. Checking
+the disassembly is the positive control; assembling without error is not.
+
+Not a concern for a file with no `;;` at all (e.g. a flat list of mnemonics used to pin encodings),
+since auto mode only touches bundling and stops, not the 41-bit slot values.
+
+## The generalisation behind four different silent-wrong-answer bugs (2026-07-31)
+**A check is worthless when the check and the mechanism it is checking travel the same code path.**
+Four routes to it, all hit in one day across this project and the emulator:
+- **constant folding** — gcc proved the test's subjects were constants and stored the literal
+  answer; the test reported a perfect score without executing the mechanism
+- **the compiler relocating the subject** — `setjmp`'s `returns_twice` spills locals to the memory
+  stack, so a test of register-stack restoration examined memory the rewind never touches
+- **a shared helper** — spill, fill, `br.call` and `br.ret` all indexed the register file through
+  one function, so they agreed with each other for ANY wrong value
+- **documented into silence** — a crosscheck compared only the destination register because a
+  comment asserted the other fields "aren't in the operand text". They were. The wrong belief was
+  written down twice and went unexamined for 22,170 samples.
+- **the instrument did not cover the hot path** — a per-phase profiler reported nothing useful
+  because every phase was instrumented but the time was in the input loop that runs *before* the
+  first phase. The measurement was real, the coverage was not. Ask what the instrument CANNOT see
+  before trusting a null result from it.
+**Actionable form: for any test, ask which code path the EXPECTATION came down.** If it is the same
+one as the result, the test cannot fail. And when a tool reports success, check its denominator —
+"0 unknown of 17,376 slots" was a real result from walking only `.text` in a C++ archive whose code
+all lives in `.text._ZN...` COMDATs; the true figure was 146 of 215,558.
+
+## Writing IA-64 assembly that touches the RSE — three rules, each learned by a fault (2026-08-01)
+Found by RUNNING a hand-written `ar.bspstore` probe on rx2620; none is visible to gas, and the
+first two fault rather than misbehave. Alongside the `.explicit` rule above, this is the checklist
+for any `.s` that manipulates the register stack.
+
+1. **`ar.bspstore` and `ar.rnat` may only be ACCESSED — read *or* written — with the RSE in
+   enforced lazy mode** (`ar.rsc.mode == 0`). Merely *reading* `ar.bspstore` with the RSE running
+   is an Illegal Operation fault (`ILL_ILLOPC`). Every access must sit inside a lazy-mode window,
+   including a read before you have set anything and a read on the way out.
+2. **Enforced lazy means clearing `rsc.MODE` (bits 1:0) ONLY — not writing `r0`.** `mov ar.rsc = r0`
+   also zeroes `rsc.pl`, which tells the RSE to issue its loads and stores at privilege level 0;
+   from a user process that faults the moment the RSE next runs. Use `and rX = -4, rSAVED`.
+   HP's own `___longjmp` does exactly this (`and r27 = -4, r24`) — the answer was sitting in a
+   disassembly we had already read, which is the reusable lesson: when unsure how to drive a
+   platform mechanism, disassemble the vendor routine that already does it.
+3. **A routine that rewinds `ar.bspstore` and then RETURNS must put it back — and `ar.rnat` with
+   it.** Otherwise `br.ret` refills the caller's frame from wherever the anchor now points; the
+   caller returns with a garbage `b0`. `longjmp` gets away with a rewind only because it rewinds to
+   the frame it is actually returning *into*. A probe that returns normally must restore what it
+   moved.
+
+Also: **stay in lazy mode across the whole window.** Re-enabling the RSE between a rewind and the
+reads lets it spill eagerly through the rewound anchor — `SEGV_MAPERR`. Reading GRs and storing to
+memory need no RSE, so there is nothing to re-enable it for.
+
+## Emulator-vs-box output diffs: `%llx` is a known false positive (2026-08-01)
+Under the ia64-emulator only, HP's printf renders `%llx` as if `#` were set — `0x123456789a` where
+rx2620 prints `123456789a`. Same for `%llX` and `%llo`. `%llu`, `%lld`, `%lx`, `%x` and `%p` are
+identical. Pre-existing and localised to the conversion routine. If you ever diff a build's output
+between the box and the emulator, do not chase a leading `0x` on a long-long hex conversion.
+
+## `readelf -s` prints `.dynsym` and `.symtab` back to back with NO blank line (2026-08-01)
+So the natural `sed '/dynsym/,/^$/p'` to isolate the dynamic symbols runs to EOF and silently
+sweeps up `.symtab` as well. `.symtab` legitimately still lists names that `.dynsym` does not
+export, so the result is a symbol list that looks like a leak and is not. Reported by the linker
+session, which caught it before believing it — their export test had "found" 8 leaked symbols.
+
+Use a range that ends at the next table, not at a blank line:
+
+```sh
+readelf -s lib.so | awk '/\.dynsym/{d=1} /\.symtab/{d=0} d'
+```
+
+Generalises: **before parsing any tool's output with a blank-line delimiter, check the tool
+actually emits one.** This is the same family as walking only `.text` in a C++ archive whose code
+lives in COMDATs, and as instrumenting every phase when the time is in the loop before them — the
+instrument's coverage was not what its author believed.
+
+## Verifying a "pure speedup": compare BEHAVIOUR, not just the artifact (2026-08-01)
+When a change is argued to be output-neutral, comparing the produced file is the weak check and
+comparing what that file *does* is the strong one. The linker session's stub-search reorder is the
+worked example: reordering which of several equally-reachable stubs a branch is given cannot change
+the stub *set*, only the assignment — a good argument, and good arguments have been wrong here
+before. What they actually did:
+
+1. same stub count from both builds — **13,142**, and independently confirmed by this session with
+   a different method (`objdump -d | grep -c 'brl\.'`) from a different session
+2. same image size — 96,275,304 bytes
+3. ★ **both resulting cc1plus binaries compiled the same C++ TU to byte-identical object code**
+
+Only (3) settles it. (1) and (2) say the artifact looks the same; (3) says it behaves the same.
+For a compiler or linker the behavioural check is cheap — build something with both and `cmp` the
+output — and it is the difference between "the bytes match" and "it still works".
+
+Related: an earlier `qsort`-for-insertion-sort swap in the same session was verified the same way,
+which matters because insertion sort is stable and qsort is not, so "same set" did not imply
+"same order" and the order was observable.
+
+## "Both implementations fail" is NOT evidence of a common cause (2026-08-01)
+The cheapest way to misread a control. A reproducer was run through two linkers, both produced a
+faulting shared library, and the conclusion drawn was "the platform/relocation is at fault, not the
+new linker". Wrong: they failed for **two unrelated reasons** that happened to share a symptom class.
+
+What went wrong is worth stating precisely, because the control itself looked textbook — it varied
+exactly one thing, the linker:
+
+- the **test case** varied two mechanisms at once. The failing function both went through `gp` AND
+  reached `.rodata`, so a failure could not say which.
+- the **compiler choice** silently added a third variable. Built with gcc 9.5, which emits
+  `GPREL64I`, both libraries carried a relocation the vendor linker is *separately* documented to
+  mishandle. Rebuilding with gcc 4.7.4 — which emits `LTOFF22X` and never `GPREL64I` — separated
+  them, and the vendor linker then **passed**.
+
+**The fix is to vary one thing in the TEST CASE too, not just in the tool.** Split the failing
+function into the smallest independent exports — one touching no `gp`, one reaching `.sdata`, one
+reaching `.rodata` — and the mechanism names itself. That is what identified the real defect
+(a missing load-time relocation for a same-module data address) and simultaneously disproved the
+"wrong GP" theory, since the `.sdata` case passed.
+
+Corollary for reporting: when two implementations fail the same way, **ask what would have to be
+true for that to be one bug**, and test it. Coincidence is common when the symptom is "SIGSEGV".
+
+**And the positive form, which is the one that would have caught this a day earlier: when a test
+splits into pass and fail, THE DIFFERENCE BETWEEN THE TWO CASES IS THE FINDING — name it explicitly
+before drawing any conclusion from either side.** A split ran `.sdata` (passed) against `.rodata`
+(failed) and both sessions read it as "gp is correct", in bold, and moved on. The true sentence was
+one qualifier longer — *gp is correct for targets in gp's own segment* — and that qualifier was the
+entire finding: on this platform the text and data segments load independently, so a gp-relative
+constant reaching text is wrong the moment a shared library loads. Both of us named the mechanism we
+were testing FOR and not the one that actually separated the two cases.
+
+Practical form: after any pass/fail split, write down every property in which the two cases differ
+BEFORE interpreting either. If more than one differs, the test has not isolated anything yet.
+
+## Spec `-L` paths shadow the build's own `-L` — put them in the startfile prefixes instead (2026-08-02)
+
+Patch 05c hardcodes `-L/usr/lib/hpux64 -L/lib/hpux64 -L/usr/ccs/lib/hpux64` into `LINK_SPEC`,
+because `--disable-multilib` (forced by the LP64-only build) deletes the multilib machinery that
+normally supplies them, leaving the driver unable to find `libc`. That patch is necessary and it
+works — but it puts those paths **ahead of every `-L` the build itself passes**, and that caused a
+second bug months later: gcc 9.5's stage2 `cc1` link resolved `-lz` to HP's zlib 1.2.3 in
+`/usr/lib/hpux64` instead of gcc's own bundled 1.2.11, and died on `undefined symbol gzopen64`.
+
+The ordering is structural, from `LINK_COMMAND_SPEC` (gcc.c:1036):
+
+```
+... %l ... %{!nostartfiles:%S} ... %@{L*} %(mfwrap) %(link_libgcc) ... %o ...
+     ^LINK_SPEC                      ^cmdline -L    ^= "%D" = -L per startfile prefix
+```
+
+`%l` expands **before** the command-line `-L`; `%D` expands **after** it (`%D` emits `-L`, gcc.c:5388).
+So no rearrangement *inside* `LINK_SPEC` can help — but the same paths carried in the **startfile
+prefix list** land after the build's own `-L` and stop shadowing it.
+
+**Measured 2026-08-02** with a decoy `libz.a` defining `gzopen64` (the system 1.2.3 does not, so
+whichever `-L` wins is visible as a hard link success or failure):
+
+| paths supplied via | cmdline `-L` | LP64 paths | outcome |
+|---|---|---|---|
+| `LINK_SPEC` (05c today) | pos 14 | pos 6–8 | `undefined symbol gzopen64` |
+| startfile prefixes (`-B`) | pos 11 | pos 12–14 | links, runs, exit 0 |
+| `LIBRARY_PATH` env | pos 11 | pos 14–16 | links, runs, exit 0 |
+
+Controls under the fix: `libc`+`libm`, C++ exceptions (so `libunwind` resolves), and the
+`/usr/lib/hpux64/unix98.o` startfile all still work.
+
+**Two traps found while testing this:**
+
+- **`startfile_prefix_spec` cannot be overridden with `-specs=`.** The driver consumes it at
+  gcc.c:7677 but reads user spec files at gcc.c:7738 — 61 lines too late. A `-specs=` file setting
+  it produces a `%D` list byte-identical to baseline, i.e. the experiment silently tests nothing.
+  Use `-B` to exercise the same list from the command line; it feeds `startfile_prefixes` too.
+- **`STARTFILE_PREFIX_SPEC` REPLACES rather than appends.** It is the `if` of an if/else, so
+  defining it skips `MD_STARTFILE_PREFIX`, `MD_STARTFILE_PREFIX_1` and the standard prefixes
+  (gcc.c:7689). gcc's own `lib/gcc/...` prefixes are added earlier (gcc.c:4229–4715) and do survive,
+  so `-lgcc` is safe — but `/usr/ccs/lib/` would have to be re-listed by hand.
+
+**Therefore the better vehicle on ia64-hpux is `MD_STARTFILE_PREFIX_1`, which this target leaves
+unused** — it appends, with no replace semantics:
+
+```c
+#undef  MD_STARTFILE_PREFIX
+#define MD_STARTFILE_PREFIX   "/usr/lib/hpux64/"       /* LP64 libc/libm/libunwind, unix98.o */
+#undef  MD_STARTFILE_PREFIX_1
+#define MD_STARTFILE_PREFIX_1 "/usr/ccs/lib/hpux64/"   /* crt0.o, lddstub */
+```
+
+and delete the three `-L` from `LINK_SPEC`. Note `/lib` is a symlink to `/usr/lib`, so 05c's
+`-L/lib/hpux64` is **redundant** — it names the same directory as `-L/usr/lib/hpux64`.
+
+Not applied yet: 05c as written is proven and a bootstrap depends on it. This replaces 05c's `-L`
+block *and* the `gcc/Makefile.in` `ZLIB` patch with one smaller change, so it belongs at the start
+of the next gcc build, not in the middle of a running one.
+
+## `ps` truncation silently disables the "discard truncated objects" step in stop scripts (2026-08-02)
+
+Stop scripts for long builds capture the in-flight compilers' `-o` arguments before killing, so the
+objects they were mid-write can be deleted — otherwise `make` sees a truncated `.o` newer than its
+source on resume and links it, which is a silent wrong answer rather than an error.
+
+That capture does not work on HP-UX. `ps` truncates command lines, and a gcc driver line is long
+enough that `-o <target>` falls past the cut, so `sed -n 's/.* -o \([^ ]*\).*/\1/p'` yields **nothing**
+and the cleanup loop runs zero times while reporting success. Observed 2026-08-02: a live `cc1` was
+captured in the snapshot, and the in-flight list still came out empty.
+
+Do not depend on it. Either bound the risk structurally — stop only where little is in flight, then
+verify (`find <current stage dir> -name '*.o' | wc -l`) — or drive cleanup from a `find ... -newer
+<reference file>` created before the kill, since HP-UX `find` has **no `-mmin` and no `-newermt``**.
+Related: the same missing predicates made an earlier stop script's cleanup a no-op for two weeks.
+
+## Superseding a VENDOR product: the revision must match HP's SHAPE, not our convention (2026-08-02)
+
+To replace an HP-shipped product rather than collide with it, an SD depot must reuse the vendor's
+**product tag and fileset tags**, and offer a revision that compares **greater**. Reusing the fileset
+tags is what makes it a supersede rather than an overlay: on update, files the old fileset had and
+the new one does not are removed.
+
+The trap is the revision string. Our house convention is `<upstream>-hh<n>`, but SD-UX compares
+revisions field by field, so against HP's `A.07.00-1.2.3.001` a revision of `1.3.2-hh1` compares
+**LESS** — `'1' < 'A'` in the very first field — and swinstall would refuse it as a downgrade.
+Keep the vendor's shape and bump a leading field instead: `A.07.00-1.2.3.001` → `A.08.00-1.3.2.001`.
+Put our identity in the `vendor` tag and the titles, where it does not affect ordering.
+
+Worked example: `Zlib` 1.3.2 (2026-08-02), filesets ZLIB-LIB/-INC/-DOC/-MAN/-SRC mirrored from HP's.
+Check what you are superseding first — `swlist -l product -a revision <Tag>` and
+`swlist -l file <Tag>` — because the file list tells you what will be REMOVED if you do not ship it.
+
+Related trap, same session: **`cp -p` from the NFS share fails on rx2620** with
+`cp: preserving permissions ...: Not owner`. The share's files are owned by the dev box's uid 1001
+and the box runs as uid 106, so the mode-preserving copy is denied. Use plain `cp` plus an explicit
+`chmod` for anything sourced from `/mnt/debianshare`; `-p` is fine for files already local to /var/tmp.
+
+## zlib on HP-UX 11.23 needs -DHAVE_VSNPRINTF or gzprintf() silently becomes a stub (2026-08-02)
+
+`gzguts.h` reasons "if C89/90, assume no C99 snprintf()/vsnprintf()" and keys that on
+`__STDC_VERSION__`, which gcc leaves undefined in its default `gnu89` mode. zlib then compiles
+`gzvprintf()` as `return Z_STREAM_ERROR` — a permanently broken `gzprintf()` in an otherwise
+perfect-looking library. Its own configure had already proven the real `vsnprintf` works here
+("Checking for vsnprintf() in stdio.h... Yes"), so the assumption is simply wrong on this platform.
+
+Only zlib's **self-test** catches it (`gzprintf err:` then `*** zlib test FAILED ***`) — which is the
+argument for gating on `make test` in general. The fix is a configure-line `-DHAVE_VSNPRINTF`
+(the documented escape at `gzguts.h:80`), not a patch. Also pass `CFLAGS` explicitly for a second
+reason: zlib's configure defaults to `-O3`, and -O3 is cursed on this box's ia64.
+
+## hld and SHARED libraries — WORKING as of 0.9.17 (2026-08-02); 0.9.10 and earlier are NOT
+
+**hld ≥ 0.9.17 builds correct shared libraries**: zlib 1.3.2 passes all three of its own suites
+(`test`, `shared test`, `64-bit test`) built entirely by hld. Anything at **0.9.10 or earlier
+silently produces broken `.so` files** — use HP `ld` with those. hld has always been fine for
+executables, and is irrelevant to static archives (`ar`, no linker involved). One gap remains: hld
+refuses **undefined symbols in a `.so`**, where HP `ld` correctly defers them to load time, so plain
+`gcc -shared` fails (ia64-hpux `LIB_SPEC` is `%{!shared:...}`-guarded, so the driver passes no
+`-lc`). Workaround, one line: `LDSHARED="gcc -mlp64 -shared -Wl,+h,libfoo.so.1 -lc"`.
+
+Six defects were found and fixed in one evening, 0.9.10 → 0.9.17. **Four of them needed a real
+library; two of those hid behind a fixture that passed.** The generalisation worth keeping: *a
+fixture is a hypothesis about which dimensions matter, and it is exactly as good as that hypothesis.*
+Both fixtures that fooled us were simpler than the real thing in the one dimension that turned out
+to be load-bearing — one filename, one slot boundary.
+
+Reproducers on the share, all taking the hld binary as `$1`, all seconds:
+`verify_hld_0911.sh` (full battery incl. a zlib build), `hld_reloc_repro.sh` (pointer tables),
+`iplt_repro.sh` (import descriptors), `struct_fptr_repro.sh` (struct-member pointers),
+`fnaddr_repro.sh` (address-taken-in-code), `zlib_stage_probe.sh` (which zlib call faults).
+**A test linker needs no depot and no install** — copy it to /var/tmp, symlink it as `ld` in a
+private dir, point `COMPILER_PATH` there. That is how all of this was measured; the installed
+`/opt/hld/bin/hld` was never touched.
+
+**Expect hld to emit ~35 fewer relocations than HP ld and do not read that as a defect.** On zlib:
+HP 172, hld 137, and the entire difference is import descriptors — 51 vs 16, because HP emits
+roughly one per *call site* and hld one per *distinct imported symbol*. Both run. Everything that
+should match does, to the unit: 116 data pointers each, 5 descriptors each, 95 exported symbols
+each, 17 distinct imports each. (hld expresses as anchored `DIR64` what HP splits between `DIR64`
+and `REL64`.)
+
+**Two dead ends worth not repeating — both looked like the obvious culprit, neither was.**
+
+*Missing `DT_JMPREL`/`DT_PLTREL`/`DT_PLTRELSZ`* is a deliberate design choice (relocations advertised
+once via `DT_RELA`); a one-function `.so` calling `strlen` runs correctly under hld without them.
+
+*The `R_IA64_IPLTMSB` count — hld 17 vs HP 51 on zlib, unmoved across three releases while
+everything around it changed* — is correct by design. hld emits one import descriptor per **distinct
+imported symbol**, HP roughly one per **call site**: measured at 1/4/17 descriptors against 1/4/17
+distinct symbols, and **both reproducers run correctly**, so one-per-symbol is sufficient. A number
+that does not move while everything around it changes is worth flagging — but it is also exactly
+what a correct invariant looks like.
+
+**Method note that saved this from being nonsense:** the first version of the libc-call reproducer
+set `+h libslib.so` while the files were named `libslib.<linker>.so`, so both consumers died in
+`dld.so: Unable to find library` before executing anything — which reads as "both linkers fail".
+When a SONAME and a filename disagree, nothing runs and the test measures nothing.
+
+## `-print-prog-name` is a CLAIM; `-Wl,-V` is the measurement (2026-08-03)
+
+Verified on-box, and it decides whether any "we tested linker X" statement is worth anything:
+
+| driver | `-print-prog-name=ld` | what `-Wl,-V` shows actually ran |
+|---|---|---|
+| gcc 4.7.4 (no `--with-ld`) + `COMPILER_PATH` | `/var/tmp/vtest/ld` | **hld 0.9.14** — genuinely redirected |
+| gcc 9.5 (`--with-ld=/opt/hld/bin/hld`) | the `-B` path | **the INSTALLED linker** — redirect ignored |
+
+**gcc 9.5's absolute `DEFAULT_LINKER` cannot be overridden by `-B`, by `COMPILER_PATH`, or by naming
+the file `hld` in a `-B` directory.** All three were tried. The trap is that `-print-prog-name`
+happily returns the `-B` path in every case, so a candidate linker reads as tested when it was never
+loaded, and the result is a clean-looking measurement of the wrong binary.
+
+**Rule: assert linker identity with `-Wl,-V`, never with `-print-prog-name`.** hld stamps its version
+there precisely so this is checkable. Testing an unreleased hld through gcc 9.5 requires installing
+it (root) or driving it directly on `.o` files — there is no override.
+
+This is the same family as the week lost analysing HP `ld` output believing it was hld's, and it is
+worth being blunt about why it keeps recurring: **every one of these traps is a check that returns a
+plausible answer without measuring the thing it appears to measure.** `-print-prog-name` reports a
+lookup, not an execution. `swlist` reports what SD installed, not what is on disk. A fixture reports
+its own dimensions, not the real workload's. Prefer the observation that could only be true if the
+thing actually happened.
+
+Related, same target: **`gcc -rdynamic` fails in the DRIVER** on `ia64-hp-hpux11.23` — the spec has
+no `-rdynamic`, so it never reaches the linker. hld accepts it (0.9.18+) but only `-Wl,-E` /
+`-Wl,--export-dynamic` can exercise that through gcc. A configure script probing `$CC -rdynamic` and
+getting a rejection is behaving correctly; it is not an hld gap.
+
+## `.note` version strings are a MERGE, not a producer stamp — and three ways to fail to read them (2026-08-03)
+
+HP ld records a `92453-07 linker ld HP Itanium(R) B.12.NN` string in **`.note`**, with **no `@(#)`
+prefix**. Two consequences, both of which cost time on the same file within an hour:
+
+**1. It does not identify who linked the file.** It is inherited from input objects *and* appended by
+the linker that ran, so one binary carries several. Measured:
+```
+crt0.o        B.12.35        libc.so.1     B.12.11        libunwind.so  B.12.43
+a fresh HP-ld link with crt0.o  ->  B.12.35 AND B.12.42   (inherited + the ld that ran)
+```
+⇒ **Never infer provenance from a `.note` version.** Use `what` (the `@(#)` stamp, which a producer
+writes deliberately) or `-Wl,-V` for linkers. `.note` answers "what went into this", not "who made it".
+
+**2. Three readers disagree on whether the string exists at all:**
+| reader | result |
+|---|---|
+| `what` | **cannot see it** — no `@(#)` prefix |
+| `/usr/bin/strings` (HP) | **0** by default; **1** with `-a` |
+| GNU `strings` (binutils2461) | 1 |
+| `readelf -p .note` | shows it plainly — **use this** |
+
+**And the meta-trap, which is the transferable one:** my "0 hits" came from
+`/opt/gnu/bin/strings <file> 2>/dev/null | grep -c` where **`/opt/gnu/bin/strings` does not exist**.
+A missing binary plus discarded stderr plus `grep -c` yields a confident, plausible **0** — identical
+to "the string is absent". `cmd 2>/dev/null | grep -c pattern` returns 0 both when the pattern is
+missing and when `cmd` never ran. **Check the tool exists, or don't discard its stderr**, and prefer
+`grep -c` only where you have separately confirmed the producer runs. Same family as everything else
+in this file: a check that returns a plausible answer without measuring the thing it appears to.
