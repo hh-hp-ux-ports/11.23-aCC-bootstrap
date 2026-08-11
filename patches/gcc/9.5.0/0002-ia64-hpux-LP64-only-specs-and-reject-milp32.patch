@@ -7,9 +7,15 @@ the startfile from the PRESENCE of -mlp64 rather than the actual ABI, so simply
 flipping the default would link 32-bit startfiles against 64-bit code. Hardcode
 the hpux64 paths and make -milp32 fail loudly at both compile and link instead
 of failing confusingly later.
+REGENERATED 2026-08-11 from the header as actually installed by the working build
+(toolchain_archive/gcc95-hld-2026-07-31.tar), diffed against the pristine 9.5.0 release tarball.
+The previously published version of this patch did not apply AND was an earlier, incomplete
+revision: it was missing the LP64 library search paths (PATCH 05c) that the working build depends
+on, without which the link finds /usr/ccs/lib rather than /usr/lib/hpux64 where libc.so lives.
+
 --- a/gcc/config/ia64/hpux.h
 +++ b/gcc/config/ia64/hpux.h
-@@ -76,14 +76,27 @@
+@@ -76,30 +76,72 @@
  
  #undef ENDFILE_SPEC
  
@@ -22,6 +28,15 @@ of failing confusingly later.
 -			  %{mlp64:/usr/lib/hpux64/unix98%O%s} \
 -			  %{!mlp64:/usr/lib/hpux32/unix98%O%s}}"
 +			  /usr/lib/hpux64/unix98%O%s}"
++
++/* PATCH 05c: supply the LP64 library search paths explicitly.  On ia64-hpux the hpux64 -L
++   directories come from the MULTILIB machinery, so --disable-multilib (which this LP64-only patch
++   forces, since the ILP32 multilib cannot compile) silently removes them: the driver then searches
++   /usr/ccs/lib and never /usr/lib/hpux64, where libc.so actually lives.  HP ld hides this behind
++   built-in defaults; a linker without them reports the honest "cannot find library -lc" and the
++   build dies in libstdc++ configure with the confusing "Link tests are not allowed after
++   GCC_NO_EXECUTABLES".  Hardcoding the startfile without the library path was an incomplete patch.
++   Measured 2026-07-30.  */
 +
 +/* PATCH 05b: reject -milp32 explicitly, at compile AND link, with a real message — otherwise an
 +   ILP32 attempt fails confusingly (64-bit startfiles vs 32-bit objects) because the specs above
@@ -37,10 +52,24 @@ of failing confusingly later.
 -  "-z +Accept TypeMismatch \
 +  "%{milp32:%eILP32 is not supported by this LP64-only build: ia64-hpux ILP32 codegen ICEs in simplify_subreg (gcc 9.5, simplify-rtx.c:6458). Build for LP64 (the default here), or use gcc 4.7.4 which supports both ABIs.} \
 +   -z +Accept TypeMismatch \
++   -L/usr/lib/hpux64 -L/lib/hpux64 -L/usr/ccs/lib/hpux64 \
     %{shared:-b} \
     %{!shared: \
       -u main \
-@@ -93,13 +106,20 @@
+      %{static:-noshared}}"
+ 
++/* PATCH 05d (2026-07-31): -lunwind must be linked EXPLICITLY in a --disable-shared build.
++   ia64-hpux takes its unwinder from HP's /usr/lib/hpux64/libunwind.so.1, and gcc normally supplies
++   it from gcc.c:init_spec() — but that injection sits inside
++       #if defined(ENABLE_SHARED_LIBGCC) && !defined(REAL_LIBGCC_SPEC)     (gcc/gcc.c:1747)
++   so --disable-shared, which leaves ENABLE_SHARED_LIBGCC undefined, compiles the whole block out
++   and silently drops -lunwind. Neither pristine nor patched ia64/hpux.h mentions unwind anywhere,
++   so there is no other source for it. Symptom: the compiler builds and installs perfectly, then
++   EVERY C++ link dies with `undefined symbol _Unwind_GetGR` (also _Unwind_SetIP, _Unwind_Resume,
++   _Unwind_RaiseException...) — which reads like a broken libstdc++ but is purely a missing -l.
++   gcc 4.7.4 on this box emits "-lgcc -lunwind -lgcc" and is the control that proved the difference.
++   Placed before -lc so it precedes the trailing %G (-lgcc/-lgcc_eh) that references these symbols. */
+ #undef  LIB_SPEC
  #define LIB_SPEC \
    "%{!shared: \
       %{mt|pthread:%{fopenacc|fopenmp|%:gt(%{ftree-parallelize-loops=*:%*} 1):-lrt} -lpthread} \
@@ -50,6 +79,7 @@ of failing confusingly later.
 -	  %{mlp64:-L/usr/lib/hpux64/libp} -lgprof} \
 +     %{p:-L/usr/lib/hpux64/libp -lprof} \
 +     %{pg:-L/usr/lib/hpux64/libp -lgprof} \
++     -lunwind \
       %{!symbolic:-lc}}"
  
 -#define MULTILIB_DEFAULTS { "milp32" }
@@ -66,7 +96,7 @@ of failing confusingly later.
  
  /* A C expression whose value is zero if pointers that need to be extended
     from being `POINTER_SIZE' bits wide to `Pmode' are sign-extended and
-@@ -110,9 +130,10 @@
+@@ -110,9 +152,10 @@
  
  #define JMP_BUF_SIZE  (8 * 76)
  

@@ -18,6 +18,25 @@ front; add new ones here when a build surfaces something not listed.
 - **HP native `cc` needs `-Ae`** (ANSI + HP extensions) to compile GNU/portable C. `+DD64` = LP64,
   `+DD32` = ILP32 (default). Use `cc -Ae` as the base for HP-cc bootstraps.
 
+- **⚠️ ITANIUM TRAPS UNALIGNED ACCESS — and x86-tuned packages assume it is free.** The failure is a
+  clean **SIGBUS at runtime** (`rc=138`, "Bus error (core dumped)"), not a build error, so a package
+  can compile perfectly and then die on every invocation. Proven on **zstd 1.5.7** (2026-08-05):
+  ```c
+  #ifndef MEM_FORCE_MEMORY_ACCESS
+  #  ifdef __GNUC__
+  #    define MEM_FORCE_MEMORY_ACCESS 1     /* "compiler extension for unaligned access" */
+  ```
+  i.e. compiling with ANY gcc made zstd assume unaligned loads are safe. Fix was its own portable
+  path: **`-DMEM_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_MEMORY_ACCESS=0`** (bundled xxhash repeats the
+  pattern). ⇒ When a freshly built tool SIGBUSes immediately, look for a `FORCE_MEMORY_ACCESS` /
+  `UNALIGNED` / packed-struct knob before suspecting the compiler. Hash/compression/codec libraries
+  are the usual offenders.
+- **⚠️ A package may not define `install` for HP-UX at all.** zstd gates its install rules behind an
+  explicit platform filter (`ifneq (,$(filter Linux Darwin … AIX MSYS_NT%,$(UNAME)))`); `uname` here
+  returns **`HP-UX`**, which is absent, so `make install` fails with *"No rule to make target
+  'install'"* even though the build succeeded. Adding `HP-UX` to that filter is enough — the existing
+  rules need no other change. Check for this before concluding a staging failure is your own.
+
 ## Building gcc 4.8.5 itself
 - **`internal compiler error: in plus_constant, at explow.c:86`** while building **libgomp** (OpenMP
   runtime) — a known gcc-4.8-on-ia64 ICE from libgomp's thread-local addressing. Not a sign the
@@ -114,10 +133,11 @@ bash 5.0.18 (bash-5.0 + 18 patches) builds + runs clean on 11.23 (version `5.0.1
   not just `bin/gmake`) AND/OR pass **`--disable-dependency-tracking`** to configure (dependency
   tracking is only for incremental dev rebuilds; a one-shot package build doesn't need it). Do both to
   be safe. (xz/tar happened not to trip this; sed's automake version did.)
-- **HP `/usr/bin/make` can't build GNU packages** — use our gmake (`/home/claude/build/make-4.4/make`;
-  or build gmake first via its `build.sh`, which needs no pre-existing make). **GOTCHA: `build.sh`
-  requires `./configure` to have run FIRST** (it reads the configure-generated `build.cfg`;
-  otherwise instant `./build.cfg: not found`).
+- **HP `/usr/bin/make` can't build GNU packages** — use GNU make. Once the GNUtools depot is
+  installed that is **`/opt/gnu/bin/gmake`** (4.4.1); on a bare box, build make first via its own
+  `build.sh`, which needs no pre-existing make. **GOTCHA: `build.sh` requires `./configure` to have
+  run FIRST** (it reads the configure-generated `build.cfg`; otherwise instant
+  `./build.cfg: not found`).
 - **HP `/usr/bin/awk` is broken for build scripts** — regex errors on gcc's `opth-gen.awk`
   (`awk: There is a regular expression error` → gcc `s-options-h` fails). Provide a real awk on PATH:
   **gawk** (older 3.1.8 builds self-contained) or **mawk** (tiny, no deps); gcc's configure accepts
@@ -138,6 +158,37 @@ bash 5.0.18 (bash-5.0 + 18 patches) builds + runs clean on 11.23 (version `5.0.1
 - **m4 1.4.21 carries 2025-vintage bundled gnulib** — same broken-wrapper risk class as sed 4.9/
   coreutils 9.11. Fallbacks in order: m4 1.4.19 (2021, uncertain era) → **1.4.18 (2016, safe era)**.
 
+## ⛔ COMMANDS THAT FAIL *SILENTLY* OR *VACUOUSLY* ON 11.23 (each one has cost real work)
+The dangerous class here is not "command errors" — it is "command succeeds and returns nothing, or
+writes nothing, and you believe the empty result". Verify against a control, never against a guess.
+- **`tar czf` produces a 0-BYTE ARCHIVE *AND EXITS 0*.** GNU tar shells out to a compressor, and
+  neither `gzip` nor `xz` is on a non-interactive PATH (`gzip`/`gunzip` are in **`/usr/contrib/bin`**,
+  `xz` is in **`/opt/gnu/bin`**). Measured 2026-08-05, and the two behave DIFFERENTLY:
+  ```
+  tar czf  (gzip missing) -> rc=0  size=0   <-- SILENT. `tar czf … && rm -rf src` DELETES YOUR SOURCE
+  tar cJf  (xz   missing) -> rc=2  size=0       "Error is not recoverable: exiting now"
+  ```
+  **This destroyed 107 build logs on 2026-08-05**: stderr was discarded AND the exit code said
+  success, so nothing signalled failure. ⇒ **Never gate a deletion on tar's exit status. Check the
+  OUTPUT SIZE, and for anything irreplaceable list the members back.** FIX: plain
+  `/opt/gnu/bin/tar cf` and compress as a separate step, or put `/usr/contrib/bin:/opt/gnu/bin` on
+  PATH first — with PATH set, `tar cJf` works normally.
+- **LZMA2 IS available: `/opt/gnu/bin/xz` 5.4.7** (from GNUtools), so `.xz` is a usable archive format
+  here; `xz -9` round-trips byte-identically and `xz -t` verifies. Box has no `zstd`, no `7z`.
+- **HP `find` has no `-maxdepth`** (nor `-mmin`, nor `-newermt`). It does not error usefully in a
+  pipeline — it just yields nothing, so `find ... -maxdepth 1 | wc -l` confidently reports **0**.
+  There is no GNU find on this box (findutils is still unbuilt). Portable substitutes: `ls -p | grep
+  '/$'` for directories at depth 1, `ls -p | grep -v '/$'` for files, and a reference file +
+  `find -newer` in place of `-mmin`.
+- **`swlist -a is_protected` renders NOTHING unless products are named explicitly.** `swlist -s <depot>
+  -l product -a is_protected` prints bare product names with an empty column; the attribute only
+  appears when you list products by name (and request `-a revision` alongside). Counting `true`/`false`
+  over the un-named form yields 0/0 and means nothing.
+- Related, already known: `which` exits 0 even when it finds nothing; HP `grep` lacks `-A`/`-B`;
+  `strings` needs `-a` to see `.note`; `/usr/bin/sh`'s `echo` expands backslash escapes (use a
+  heredoc). **Reach for `/opt/gnu/bin/<tool>` by FULL PATH** — a non-interactive `ssh rx2620 'cmd'`
+  does not read `/etc/PATH`, so `/opt/gnu/bin` is absent and a bare `md5sum`/`grep` silently gets the
+  HP one or nothing.
 ## Upstream reality check (researched 2026-07-20) — nobody is coming to help
 - **ia64-hpux is an OBSOLETE gcc configuration**: bugs filed against it get SUSPENDED unfixed (e.g.
   PR target/63545, an ICE building gcc for ia64-hp-hpux11.23). GCC 14 obsoleted all ia64; the 2024

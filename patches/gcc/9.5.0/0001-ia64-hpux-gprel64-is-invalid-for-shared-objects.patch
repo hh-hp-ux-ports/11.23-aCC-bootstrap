@@ -42,7 +42,7 @@ Scale of the problem without it: our gcc 9.5 libstdc++.a carries 1,857
 GPREL64I relocations across 72 of its 183 objects.
 --- a/gcc/config/ia64/ia64.c
 +++ b/gcc/config/ia64/ia64.c
-@@ -1137,13 +1137,23 @@
+@@ -1137,13 +1137,27 @@
      emit_insn (gen_load_fptr (dest, src));
    else if (sdata_symbolic_operand (src, VOIDmode))
      emit_insn (gen_load_gprel (dest, src));
@@ -56,15 +56,18 @@ GPREL64I relocations across 72 of its 183 objects.
 -	 https://gcc.gnu.org/bugzilla/60465 */
 +	 https://gcc.gnu.org/bugzilla/60465
 +
-+	 ia64-hpux: NOT on this target.  Two reasons, either sufficient.  (a) HP ld B.12.34
-+	 mis-applies R_IA64_GPREL64I, overwriting slot 0 of the MLX bundle - which holds the
-+	 "mov rNN = r1" GP save - so any local-symbol reference dies with SIGILL.  (b) More
-+	 fundamentally, a gp-relative constant encodes the LINK-TIME distance S - GP, and on
-+	 ia64-hpux the text and data segments are mapped INDEPENDENTLY at load time, so that
-+	 distance is not preserved in a shared object.  No linker can write a correct value and
-+	 no dynamic relocation can fix it, because the loader relocates data words rather than
-+	 the 64-bit immediate inside an MLX bundle.  @ltoff (what gcc 4.7.4 emits) goes through
-+	 the linkage table, which IS relocated, and is correct in both cases.
++	 ia64-hpux: NOT on this target.  Two reasons, either sufficient.
++	 (a) HP ld B.12.34 mis-applies R_IA64_GPREL64I, overwriting slot 0 of
++	 the MLX bundle - which holds the "mov rNN = r1" GP save - so any
++	 local-symbol reference dies with SIGILL.
++	 (b) More fundamentally, a gp-relative constant encodes the LINK-TIME
++	 distance S - GP, and on ia64-hpux the text and data segments are
++	 mapped INDEPENDENTLY at load time, so that distance is not preserved
++	 in a shared object.  No linker can write a correct value, and no
++	 dynamic relocation can fix it, because the loader relocates data
++	 words rather than the 64-bit immediate inside an MLX bundle.
++	 @ltoff (what gcc 4.7.4 emits) goes through the linkage table, which
++	 IS relocated, and is correct in both cases.
 +	 Cost: one extra load per local-symbol reference.  */
        emit_insn (gen_load_gprel64 (dest, src));
      }
