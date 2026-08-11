@@ -17,7 +17,6 @@ front; add new ones here when a build surfaces something not listed.
   LDFLAGS (so use `LDFLAGS="-lunwind -lm"` by default).
 - **HP native `cc` needs `-Ae`** (ANSI + HP extensions) to compile GNU/portable C. `+DD64` = LP64,
   `+DD32` = ILP32 (default). Use `cc -Ae` as the base for HP-cc bootstraps.
-
 - **⚠️ ITANIUM TRAPS UNALIGNED ACCESS — and x86-tuned packages assume it is free.** The failure is a
   clean **SIGBUS at runtime** (`rc=138`, "Bus error (core dumped)"), not a build error, so a package
   can compile perfectly and then die on every invocation. Proven on **zstd 1.5.7** (2026-08-05):
@@ -63,20 +62,29 @@ front; add new ones here when a build surfaces something not listed.
   **gawk 3.1.8** predates `debug.c`); (b) link a gnulib `libgnu.a` providing setenv/unsetenv; (c) a
   small putenv/environ shim. Watch for other 11.23-missing POSIX funcs surfacing the same way.
 
-## Archives / extraction — LARGELY OBSOLETE since 2026-07-20 (Hugo pointed this out)
-> **GNU tar 1.35 + xz 5.4.7 + bzip2 1.0.8 ARE BUILT** (interim set, gcc 4.6.1). tar shells out to
-> the compressor programs, so the box extracts `.tar.gz`/`.tar.bz2`/`.tar.xz` AND long-path
-> (@LongLink) archives natively — put the staging bins on PATH:
-> `/home/claude/build/interim/stage-{tar-1.35,xz-5.4.7,bzip2}/usr/local/ia64/bin` (works NOW, no
-> swinstall needed; running from staging is a permitted build bridge). **Stop converting tarballs
-> to .gz on the dev box.** The issues below only still apply to a BARE box (fresh
-> install/pre-interim bootstrap) — delete this section once the interim depot is swinstalled.
-- **HP `tar` cannot read GNU `@LongLink` long-path entries** (`tar: ././@LongLink - cannot create`).
-  Any package with paths >100 chars (gcc, big trees) must be **extracted on the dev box** (GNU tar)
-  into the share; build from the pre-extracted tree (out-of-tree build reads NFS source fine).
-- **rx2620 has only `gunzip`** (`/usr/contrib/bin`), **no bzip2/xz**. Convert `.tar.bz2`/`.tar.xz` to
-  `.tar.gz` on the dev box (`bunzip2 -c f | gzip -9 > f.gz`, `xz -dc f | gzip -9 > f.gz`) OR just
-  extract on the dev box into the share. (Building GNU tar + bzip2/xz on the box removes this later.)
+## Archives / extraction — ✅ RESOLVED. The box has GNU tar/xz/bzip2 INSTALLED. Stop saying it doesn't.
+
+**Measured on-box 2026-08-10** (Hugo had to correct me twice in one session for claiming otherwise):
+
+| tool | path | note |
+|---|---|---|
+| **GNU tar 1.35** | `/opt/gnu/bin/tar` | reads `@LongLink` long paths fine |
+| xz | `/opt/gnu/bin/xz` | |
+| bzip2 | `/opt/gnu/bin/bzip2` | |
+| **gzip / gunzip** | `/usr/contrib/bin/` | ⚠️ **NOT** in `/opt/gnu/bin` — the one real gap |
+| zstd | *not installed* | built, depot not yet packaged/installed |
+
+⇒ **Extract directly on rx2620.** `.tar.gz`, `.tar.bz2`, `.tar.xz` and long-path archives all work
+(tar shells out to the compressor, and all three are present). Converting tarballs on the dev box, or
+extracting there "because HP tar can't", is obsolete advice — the only reason left to stage on the
+dev box is convenience (it has the internet), not capability.
+
+⚠️ **The lesson is bigger than tar.** This entry was marked "LARGELY OBSOLETE" for three weeks while
+the stale sentence underneath it stayed readable, and it got repeated as fact. **A stale claim about
+a MISSING tool is self-reinforcing**: it stops you running the command that would disprove it. Before
+writing "the box has no X", run `command -v X` or check `ls /opt/gnu/bin` — one cheap command against
+an inventory that changes every time a depot is installed. The full `/opt/gnu/bin` listing is ~180
+entries including coreutils, gawk, sed, grep, bash, nano, htop, find/xargs/locate, make, ncurses.
 
 ## More missing/mis-detected libc functions (found 2026-07-20 building interim tools)
 - **`memmem` is DECLARED but NOT implemented on 11.23** → `ld: Unsatisfied symbol "memmem"`. gnulib's
@@ -133,11 +141,13 @@ bash 5.0.18 (bash-5.0 + 18 patches) builds + runs clean on 11.23 (version `5.0.1
   not just `bin/gmake`) AND/OR pass **`--disable-dependency-tracking`** to configure (dependency
   tracking is only for incremental dev rebuilds; a one-shot package build doesn't need it). Do both to
   be safe. (xz/tar happened not to trip this; sed's automake version did.)
-- **HP `/usr/bin/make` can't build GNU packages** — use GNU make. Once the GNUtools depot is
-  installed that is **`/opt/gnu/bin/gmake`** (4.4.1); on a bare box, build make first via its own
-  `build.sh`, which needs no pre-existing make. **GOTCHA: `build.sh` requires `./configure` to have
-  run FIRST** (it reads the configure-generated `build.cfg`; otherwise instant
+- **HP `/usr/bin/make` can't build GNU packages** — use **`/opt/gnu/bin/gmake`** (GNU Make 4.4.1, from
+  our GNUtools depot). ⚠️ The old path `/home/claude/build/make-4.4/make` is GONE — that whole build
+  tree was deleted 2026-08-05 when `/home` was cleared for tape backup. On a stock box with no gmake
+  yet, build it via its `build.sh`, which needs no pre-existing make. **GOTCHA: `build.sh` requires
+  `./configure` to have run FIRST** (it reads the configure-generated `build.cfg`; otherwise instant
   `./build.cfg: not found`).
+
 - **HP `/usr/bin/awk` is broken for build scripts** — regex errors on gcc's `opth-gen.awk`
   (`awk: There is a regular expression error` → gcc `s-options-h` fails). Provide a real awk on PATH:
   **gawk** (older 3.1.8 builds self-contained) or **mawk** (tiny, no deps); gcc's configure accepts
@@ -177,9 +187,13 @@ writes nothing, and you believe the empty result". Verify against a control, nev
   here; `xz -9` round-trips byte-identically and `xz -t` verifies. Box has no `zstd`, no `7z`.
 - **HP `find` has no `-maxdepth`** (nor `-mmin`, nor `-newermt`). It does not error usefully in a
   pipeline — it just yields nothing, so `find ... -maxdepth 1 | wc -l` confidently reports **0**.
-  There is no GNU find on this box (findutils is still unbuilt). Portable substitutes: `ls -p | grep
-  '/$'` for directories at depth 1, `ls -p | grep -v '/$'` for files, and a reference file +
-  `find -newer` in place of `-mmin`.
+  ✅ **GNU findutils 4.10.0 IS NOW INSTALLED** (confirmed 2026-08-10): `/opt/gnu/bin/find`,
+  `xargs`, `locate`, `updatedb`. Use the absolute path or put `/opt/gnu/bin` first on PATH —
+  bare `find` still resolves to HP's, since `/usr/bin` leads the default PATH. With GNU find
+  `-maxdepth`/`-mmin`/`-newermt`/`-print0` all work normally.
+  (Pre-findutils substitutes, still valid if you are ever on HP's: `ls -p | grep '/$'` for
+  directories at depth 1, `ls -p | grep -v '/$'` for files, and a reference file + `find -newer`
+  in place of `-mmin`.)
 - **`swlist -a is_protected` renders NOTHING unless products are named explicitly.** `swlist -s <depot>
   -l product -a is_protected` prints bare product names with an empty column; the attribute only
   appears when you list products by name (and request `-a revision` alongside). Counting `true`/`false`
@@ -720,6 +734,24 @@ a fresh HP-ld link with crt0.o  ->  B.12.35 AND B.12.42   (inherited + the ld th
 ⇒ **Never infer provenance from a `.note` version.** Use `what` (the `@(#)` stamp, which a producer
 writes deliberately) or `-Wl,-V` for linkers. `.note` answers "what went into this", not "who made it".
 
+**The concrete producer stamp for linkers lives in `.comment` (confirmed 2026-08-10):**
+| linker | `.comment` holds | `what <binary>` |
+|---|---|---|
+| hld | `@(#)hld 0.11.2 - LP64 linker for HP-UX 11.23/IPF` | prints it, **with the version** |
+| HP ld | the input objects' `GCC: (GNU) 4.7.4`, concatenated | nothing |
+
+This is the only provenance check that works on a **finished artifact** — a depot you did not build,
+a binary from last month — with no build log. It also works **off-box**: the dev box's `readelf -p
+.comment` / `strings` read HP-UX ia64 binaries fine, so a depot can be audited without booting
+rx2620. Gate packaging on it: a build script that merely *prints* the linker it measured will ship an
+HP-ld binary when a link silently falls back, which is exactly how `GNUfindutils 4.10.0-hh1` shipped.
+Re-check after `make install` — a stripping install rule erases `.comment` and the provenance with it.
+
+⚠️ **`-Wl,-V` is a QUERY: hld prints its version and EXITS WITHOUT LINKING.** No output file is
+produced, so it cannot double as the artifact probe. A gate that links with `-Wl,-V` and then reads
+the result's stamp inspects a file that does not exist and reports a false "not hld-linked". Two
+probes: `-Wl,-V` for the version, a plain link for something to inspect.
+
 **2. Three readers disagree on whether the string exists at all:**
 | reader | result |
 |---|---|
@@ -735,3 +767,89 @@ to "the string is absent". `cmd 2>/dev/null | grep -c pattern` returns 0 both wh
 missing and when `cmd` never ran. **Check the tool exists, or don't discard its stderr**, and prefer
 `grep -c` only where you have separately confirmed the producer runs. Same family as everything else
 in this file: a check that returns a plausible answer without measuring the thing it appears to.
+
+## ⛔ NEVER put `-include <header>` in the CFLAGS you hand to a gnulib `configure` (2026-08-10)
+
+It corrupts the build in a way that surfaces hundreds of lines later as an HP `/bin/sh` syntax error:
+
+```
+/bin/sh: Syntax error at line 1 : `}' is not expected.
+gmake[5]: *** [Makefile:4179: libgnulib_a-access.o] Error 2
+```
+
+**Mechanism.** gnulib's `gl_CFLAG_GNULIB_WARNINGS` writes a `conftest.c` that is **not C** — it is a
+list of `-Wno-*` flags wrapped in `#if` compiler-version guards — and uses the preprocessor purely to
+filter that list, keeping every output line that does not begin with `#`:
+
+```sh
+gl_command="$CC $CFLAGS $CPPFLAGS -E conftest.c > conftest.out"
+gl_options=`grep -v '#' conftest.out`
+for word in $gl_options; do GL_CFLAG_GNULIB_WARNINGS="$GL_CFLAG_GNULIB_WARNINGS $word"; done
+```
+
+A force-included header makes `-E` emit all of its declarations — and every system header it drags
+in — ahead of the flag list. None of those lines start with `#`, so all of them survive the filter
+and become "flags". `GL_CFLAG_GNULIB_WARNINGS` is then substituted into **every** gnulib compile
+line, and HP `/bin/sh` dies on the first `}` of the first struct.
+
+The unquoted `for word in $gl_options` also **globs**, so `char *` expands against the build
+directory. That is the tell in the generated Makefile — real filenames embedded mid-declaration:
+```
+extern int getopt(int, char cfg.log confdefs.h config.log conftest.c conftest.out const [], ...
+```
+Seeing your own build artifacts inside a C prototype means a shell loop consumed preprocessor output.
+
+**Diagnosis, when the error names a `.o` and gives no useful context:** the recipe is identical to a
+known-good build's, so the difference is in a variable. `gmake -n <the.o>` prints the expanded
+command and the junk is unmissable; `grep '^GL_CFLAG_GNULIB_WARNINGS' Makefile` confirms it in one
+line. Diffing the generated Makefile against a previous working objdir localises it fastest.
+
+**Fix / general rule:** anything that makes `-E` emit content — `-include`, `-imacros` — belongs in
+the *build*, never in the flags a gnulib configure sees. Better still, fix the underlying need
+properly: the force-include here was guarding against implicit declarations, but only **one** existed
+(`strtok_r`), and HP declares it correctly in `<string.h>` behind `#ifdef _REENTRANT`. **`-D_REENTRANT`
+exposes the platform's own prototype** and costs nothing.
+
+### The reason that one implicit declaration mattered: LP64 pointer truncation
+`strtok_r` returns `char *`. Implicitly declared, it is typed `int`, and **LP64 truncates the
+returned pointer to 32 bits** — the same failure that made htop die in `strchr` on `0x21d00`. The
+crash lands nowhere near the cause, so catch it at compile time and treat it as fatal:
+
+```sh
+grep -c "implicit declaration of function" mk.log     # must be 0
+grep -o "implicit declaration of function .[a-zA-Z_0-9]*" mk.log | sort -u
+```
+
+Any name in that list returning a pointer is a live LP64 bug. HP hides several reentrant prototypes
+behind `_REENTRANT`, so look for the feature-test macro before writing a shim declaration.
+
+## ⛔ Undefined WEAK symbols do NOT resolve to 0 — dld refuses the image at LOAD (2026-08-10)
+
+Reported by the hld project session, verified there under **both** linkers. The optional-dependency
+idiom that gnulib, glib and friends use freely:
+
+```c
+extern int maybe_absent(void) __attribute__((weak));
+int probe(void) { return maybe_absent ? maybe_absent() : -7; }   /* expects 0 when unprovided */
+```
+
+```
+hld    -> dld.so: Unsatisfied code symbol 'maybe_absent' in load module './libwu.so'
+HP ld  -> dld.so: Unsatisfied code symbol 'maybe_absent' in load module './libwu.so'
+```
+
+**Both linkers accept it; the DYNAMIC LOADER rejects it.** So this is neither an hld gap nor
+something `+noallowunsats` or any link flag changes — the symbol must actually be satisfied, or the
+feature configured out of the package.
+
+**Why it is expensive:** the build is clean and silent, and the failure appears only when the binary
+is RUN, as `Unsatisfied code symbol` from dld. If a package built without complaint and dies at
+startup that way, check for weak undefined symbols first. It also means a "successful build" gate
+that never executes the artifact cannot catch it — one more reason every build here ends by running
+the thing.
+
+💡 Weak **defined** symbols are fine: a strong definition in the program overrides a weak one in a
+library, identically under both linkers. Only *undefined* weak is broken.
+
+Mitigation: static linking sidesteps it entirely (the symbol is resolved or the link fails loudly),
+which is one more argument for `--disable-shared` on build-tooling like Tcl/Expect.
